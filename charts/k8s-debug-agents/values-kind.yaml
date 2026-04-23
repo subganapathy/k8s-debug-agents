@@ -1,0 +1,27 @@
+# Kind dev overrides.
+# Used by: make app-install (default), make cluster-up.
+#
+# Purpose:
+# - Smaller resource requests so 4-node Kind cluster fits on a laptop
+# - Verbose-friendly settings where useful
+# - Same `namespace.istioInjection: true` as prod (we want dev and prod to use
+#   the mesh path identically)
+
+namespace:
+  name: agent-system
+  istioInjection: true
+
+images:
+  # Empty registry means `kind load docker-image` loads the images directly.
+  # The tag matches what `make build-images` produces in later steps.
+  registry: ""
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+
+# Components disabled for now; later steps will flip these on with dev-sized resources.
+nodeAgent:
+  enabled: false
+credentialAuthz:
+  enabled: false
+dispatcher:
+  enabled: false

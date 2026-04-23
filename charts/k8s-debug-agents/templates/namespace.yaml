@@ -1,0 +1,23 @@
+{{/*
+Creates the agent-system namespace and labels it for Istio sidecar injection.
+
+Why this is in the chart (and not just --create-namespace on helm install):
+- --create-namespace doesn't set labels, so sidecar injection wouldn't apply to
+  pods in the namespace without a second kubectl step.
+- Making the namespace declarative + part of the chart is GitOps-friendly —
+  ArgoCD / Flux can reconcile the label if something drifts.
+- Idempotent: Helm owns this resource; re-sync is a no-op when state matches.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    {{- if .Values.namespace.istioInjection }}
+    istio-injection: enabled
+    {{- end }}
+  {{- with .Values.global.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
