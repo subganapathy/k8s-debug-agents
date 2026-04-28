@@ -1,0 +1,20 @@
+k8s-debug-agents installed.
+
+Chart version : {{ .Chart.Version }}
+App version   : {{ .Chart.AppVersion }}
+Namespace     : {{ .Values.namespace.name }}
+Istio inject  : {{ .Values.namespace.istioInjection }}
+
+Current components enabled:
+  node-agent        : {{ .Values.nodeAgent.enabled }}
+  credential-authz  : {{ .Values.credentialAuthz.enabled }}
+  dispatcher        : {{ .Values.dispatcher.enabled }}
+
+In Step 1, no components are enabled — only the namespace is created.
+Verify sidecar injection works:
+
+  kubectl apply -f evals/smoke-test/pod.yaml
+  kubectl get pod smoke-test -n {{ .Values.namespace.name }} -o jsonpath='{.spec.containers[*].name}{"\n"}'
+  # Expect: smoke-test istio-proxy  (two names)
+
+Or: make smoke-test

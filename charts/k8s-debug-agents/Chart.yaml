@@ -1,0 +1,25 @@
+apiVersion: v2
+name: k8s-debug-agents
+description: Kubernetes-native debugging agents. Dispatcher, agent-tasks, node-agent, credential-authz.
+type: application
+
+# Chart version — bumped per release of the chart itself.
+version: 0.1.0
+
+# Application version — bumped when the application images change.
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.28.0-0"
+
+home: https://github.com/subganapathy/k8s-debug-agents
+sources:
+  - https://github.com/subganapathy/k8s-debug-agents
+
+maintainers:
+  - name: Subramanian Ganapathy
+    email: subramanian.ganapathy86@gmail.com
+
+# Istio is NOT a sub-chart dependency here. We intentionally use three separate Helm
+# releases (istio-base, istiod, k8s-debug-agents) — see CLAUDE.md and
+# design_install_flow.md. Istio is assumed to be already installed (BYO in prod;
+# `make istio-install` installs it in Kind).

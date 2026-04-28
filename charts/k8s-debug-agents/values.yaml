@@ -1,0 +1,50 @@
+# Default values for k8s-debug-agents.
+# Override with -f values-kind.yaml (dev) or values-prod.yaml (prod).
+#
+# Prod is the default shape (BYO Istio, conservative resource requests) so that
+# operators pulling the chart unmodified don't accidentally get dev-only behavior.
+
+# ─── Namespace + Istio integration ─────────────────────────────────────────────
+
+namespace:
+  # The namespace this chart's workloads run in. Helm's --namespace flag creates
+  # the namespace; this template also ensures the istio-injection label is set.
+  name: agent-system
+
+  # Set to true to have Istio's sidecar injector mutate pods in this namespace.
+  # Required for the credential flow to work (Anthropic API key injection via
+  # ext_authz). Only reason to set false: you're installing this chart outside
+  # the mesh for a test that doesn't exercise the credential path.
+  istioInjection: true
+
+# ─── Image references ──────────────────────────────────────────────────────────
+# All component images. Registry is an org-level override (empty string = local
+# images loaded via `kind load`, which is what the dev loop uses).
+images:
+  registry: ""              # e.g. "ghcr.io/subganapathy" in prod. Empty = local.
+  pullPolicy: IfNotPresent
+  tag: "0.1.0"
+  # Component-specific image names. Filled in as components are built.
+  nodeAgent: k8s-debug-agents/node-agent
+  credentialAuthz: k8s-debug-agents/credential-authz
+  dispatcher: k8s-debug-agents/dispatcher
+  agentTask: k8s-debug-agents/agent-task
+
+# ─── Per-component configuration ───────────────────────────────────────────────
+# Each component is populated by a stacked PR in the build order.
+# Step 1 only uses namespace + helpers; component subsections are placeholders.
+
+nodeAgent:
+  enabled: false           # Step 6 turns this on
+
+credentialAuthz:
+  enabled: false           # Step 2 turns this on
+
+dispatcher:
+  enabled: false           # Step 4 turns this on
+
+# ─── Global ────────────────────────────────────────────────────────────────────
+global:
+  # Used by templates for labels/annotations common to all resources.
+  labels: {}
+  annotations: {}

@@ -1,0 +1,35 @@
+# Kind cluster config — 1 control-plane + 3 workers with zone labels.
+#
+# Zone labels let us test topology-spread scenarios later (Step 5 evals).
+# Three workers is the minimum for anti-affinity / spread scenarios that need
+# ≥2 failure domains plus a tie-breaker.
+#
+# Node image is pinned to K8s v1.33.1 — bump deliberately when kind's default
+# image catches up. See https://github.com/kubernetes-sigs/kind/releases for
+# the exact sha256 tags.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: debug-agent
+
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.33.1
+    labels:
+      topology.kubernetes.io/zone: zone-a
+  - role: worker
+    image: kindest/node:v1.33.1
+    labels:
+      topology.kubernetes.io/zone: zone-a
+  - role: worker
+    image: kindest/node:v1.33.1
+    labels:
+      topology.kubernetes.io/zone: zone-b
+  - role: worker
+    image: kindest/node:v1.33.1
+    labels:
+      topology.kubernetes.io/zone: zone-c
+
+# Feature gates can be enabled per-release here if we need them. None needed
+# for Phase 1 — all Istio + our features work on K8s 1.33 defaults.
+featureGates: {}

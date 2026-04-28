@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Helm
+charts/*/charts/
+charts/*/Chart.lock
+charts/*/requirements.lock
+
+# Local dev
+.env
+.env.local
+kubeconfig-*
+*.kubeconfig

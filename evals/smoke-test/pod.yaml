@@ -1,0 +1,26 @@
+# A trivial pod used solely to verify that Istio sidecar injection works in
+# the agent-system namespace. The 'pause' image from K8s is about 700KB, does
+# nothing, and always has its container named after the pod — which lets us
+# assert that kubectl sees exactly 2 containers (smoke-test + istio-proxy).
+#
+# This pod is deleted at the start of every smoke test (see setup.sh).
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: smoke-test
+  namespace: agent-system
+  labels:
+    app: smoke-test
+    purpose: sidecar-injection-verification
+spec:
+  containers:
+    - name: smoke-test
+      image: registry.k8s.io/pause:3.10
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
