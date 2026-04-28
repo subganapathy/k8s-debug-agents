@@ -18,10 +18,23 @@ images:
   pullPolicy: IfNotPresent
   tag: "0.1.0"
 
-# Components disabled for now; later steps will flip these on with dev-sized resources.
+# Components: enable progressively as build steps land.
 nodeAgent:
-  enabled: false
-credentialAuthz:
-  enabled: false
+  enabled: false           # Step 6
 dispatcher:
-  enabled: false
+  enabled: false           # Step 4
+
+# credentialAuthz: enabled (default in values.yaml). Kind-specific overrides:
+# - 1 replica is enough on a single-machine Kind cluster (saves ~50m CPU)
+# - debug logging by default; you'll want detailed traces while iterating
+credentialAuthz:
+  enabled: true
+  replicas: 1
+  logLevel: debug
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi

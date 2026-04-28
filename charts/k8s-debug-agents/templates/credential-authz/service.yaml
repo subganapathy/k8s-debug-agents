@@ -1,0 +1,27 @@
+{{- if .Values.credentialAuthz.enabled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: credential-authz
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: credential-authz
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "k8s-debug-agents.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: credential-authz
+  ports:
+    # Port name "grpc-authz" matters for Istio: Istio infers the protocol from
+    # the port name prefix (grpc-, http-, etc.). The EnvoyFilter in Step 3
+    # references this port by name. See https://istio.io/latest/docs/ops/configuration/traffic-management/protocol-selection/
+    - name: grpc-authz
+      port: {{ .Values.credentialAuthz.port }}
+      targetPort: grpc-authz
+      protocol: TCP
+    - name: http-health
+      port: {{ .Values.credentialAuthz.healthPort }}
+      targetPort: http-health
+      protocol: TCP
+{{- end -}}

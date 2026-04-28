@@ -23,16 +23,25 @@ KIND_CONFIG        ?= evals/kind-config.yaml
 SMOKE_POD          ?= evals/smoke-test/pod.yaml
 ISTIO_REPO_URL     := https://istio-release.storage.googleapis.com/charts
 
+# Image config — local Kind dev. Empty REGISTRY means images are loaded via
+# `kind load docker-image` rather than pushed to a remote registry.
+REGISTRY           ?=
+IMAGE_TAG          ?= 0.1.0
+CREDENTIAL_AUTHZ_IMAGE := k8s-debug-agents/credential-authz:$(IMAGE_TAG)
+
 # ─── Help ──────────────────────────────────────────────────────────────────────
 .PHONY: help
 help: ## Show this help
 	@echo "k8s-debug-agents — make targets"
 	@echo ""
 	@echo "Kind dev loop:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(cluster-up|cluster-down|smoke-test):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(cluster-up|cluster-down|smoke-test|build-[a-z-]+|test-[a-z-]+):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Generic (any cluster):"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(istio-|app-)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(istio-|app-)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Security guardrails:"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(install-pre-commit|security-scan):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Variables (override on command line):"
 	@echo "  CLUSTER_NAME=$(CLUSTER_NAME)"
@@ -131,3 +140,47 @@ app-uninstall: ## Uninstall k8s-debug-agents chart
 	-helm uninstall k8s-debug-agents --namespace $(AGENT_NAMESPACE)
 	@echo ">> Namespace $(AGENT_NAMESPACE) intentionally NOT deleted — would remove any unrelated workloads."
 	@echo ">>       To remove: kubectl delete namespace $(AGENT_NAMESPACE)"
+
+# ─── Image build (Kind dev loop) ───────────────────────────────────────────────
+
+.PHONY: build-images
+build-images: build-credential-authz-image ## Build all component images and load into Kind
+
+.PHONY: build-credential-authz-image
+build-credential-authz-image: ## Build credential-authz image and kind-load into the dev cluster
+	@echo ">> Building $(CREDENTIAL_AUTHZ_IMAGE)"
+	docker build \
+	  --file docker/credential-authz/Dockerfile \
+	  --tag $(CREDENTIAL_AUTHZ_IMAGE) \
+	  .
+	@echo ">> Loading $(CREDENTIAL_AUTHZ_IMAGE) into Kind cluster $(CLUSTER_NAME)"
+	kind load docker-image $(CREDENTIAL_AUTHZ_IMAGE) --name $(CLUSTER_NAME)
+
+# ─── Step 2 verification ───────────────────────────────────────────────────────
+
+.PHONY: test-credential-authz
+test-credential-authz: ## End-to-end verify: create test secret, hit ext_authz, assert x-api-key in response
+	@./evals/credential-authz/check.sh
+
+# ─── Security guardrails ───────────────────────────────────────────────────────
+# Layer 2 of accidental-secret-checkin defense (Layer 1 = .gitignore patterns,
+# Layer 3 = GitHub push protection, Layer 4 = Anthropic dashboard limits).
+
+.PHONY: install-pre-commit
+install-pre-commit: ## Install pre-commit framework + activate hooks defined in .pre-commit-config.yaml
+	@command -v pre-commit >/dev/null || { \
+	  echo ">> pre-commit not installed. Install with: brew install pre-commit (macOS) or pip install pre-commit"; \
+	  exit 1; \
+	}
+	pre-commit install
+	@echo ""
+	@echo "Hooks activated. Every commit will now scan for secrets via gitleaks."
+	@echo "To run hooks against the entire repo (not just staged): pre-commit run --all-files"
+
+.PHONY: security-scan
+security-scan: ## Scan the entire working tree for committed secrets (gitleaks)
+	@command -v gitleaks >/dev/null || { \
+	  echo ">> gitleaks not installed. Install with: brew install gitleaks"; \
+	  exit 1; \
+	}
+	gitleaks detect --source=. --verbose --redact

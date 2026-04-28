@@ -1,0 +1,45 @@
+{{- if .Values.credentialAuthz.enabled -}}
+# Role + RoleBinding scoped to a single Secret via resourceNames.
+#
+# Why resourceNames matters:
+# Without resourceNames, "get secrets" lets the holder read EVERY secret in
+# the namespace — ServiceAccount tokens, TLS certs, anything. With
+# resourceNames, this Role permits reading exactly one Secret by name (the
+# Anthropic API key). Even if the RoleBinding is later expanded to more
+# subjects, those subjects can still only read this one Secret.
+#
+# Note: credential-authz reads the key from a *mounted file*, not via the
+# K8s API. So this Role isn't strictly necessary for the key-loading flow.
+# It's defense in depth: if someone modifies the Deployment to call the K8s
+# API for the Secret (e.g., during debugging), the RBAC scope is already tight.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: credential-authz-secret-reader
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: credential-authz
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.credentialAuthz.secret.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: credential-authz-secret-reader
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: credential-authz
+subjects:
+  - kind: ServiceAccount
+    name: credential-authz
+    namespace: {{ .Values.namespace.name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: credential-authz-secret-reader
+{{- end -}}
