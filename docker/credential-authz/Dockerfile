@@ -1,4 +1,10 @@
+# syntax=docker/dockerfile:1.7
+#
 # Build credential-authz as a static binary in a multi-stage build.
+#
+# The `# syntax=` directive at the very top opts in to BuildKit's modern
+# Dockerfile frontend, which is required for `RUN --mount=type=cache,...`.
+# Docker 23+ uses BuildKit by default, so this works out of the box.
 #
 # Stage 1: golang builder. Uses GOOS/GOARCH for cross-compilation; CGO disabled
 # so the binary has no libc dependencies and can run on distroless.
@@ -20,10 +26,21 @@ FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 
 WORKDIR /src
 
-# Copy go.mod / go.sum first to populate the module cache layer.
-# Subsequent code changes don't bust the dependency layer unless deps change.
+# Copy go.mod / go.sum first so the dependency-download step is cached
+# independently of source-code changes.
 COPY credential-authz/go.mod credential-authz/go.sum ./
-RUN go mod download
+
+# `--mount=type=cache,target=/go/pkg/mod` is BuildKit's mount cache:
+# /go/pkg/mod (Go's module download cache) is a host-side persistent directory
+# that survives across builds, even when the layer cache is invalidated.
+# `sharing=locked` serializes concurrent builds writing to the same cache —
+# Go's module manager doesn't always handle parallel writes safely.
+#
+# Side effect: modules downloaded here are NOT captured in the resulting
+# layer (the mount point is excluded from the filesystem diff). The layer
+# this RUN produces is essentially empty.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
 
 COPY credential-authz/ .
 
@@ -39,7 +56,20 @@ ENV CGO_ENABLED=0 \
     GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH}
 
-RUN go build \
+# Two mount caches here:
+# - /go/pkg/mod: same module cache as above; surfaces deps `go build` needs
+# - /root/.cache/go-build: Go's COMPILATION cache. Stores compiled .a files
+#   for every package, keyed by source content. Incremental rebuilds reuse
+#   compiled packages whose source didn't change. THIS is the big speedup
+#   for warm builds with code changes.
+#
+# Without this mount cache, even a one-line change forces Go to recompile
+# every dependency package from scratch (the compilation cache lives in
+# /root/.cache/go-build inside the container, gets baked into a layer that
+# is then invalidated on the next code change).
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    go build \
       -trimpath \
       -ldflags="-s -w" \
       -o /out/credential-authz \
