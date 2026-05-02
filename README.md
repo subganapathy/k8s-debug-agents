@@ -29,15 +29,62 @@ Makefile                   # cluster-up / cluster-down / istio-install / app-ins
 Empty component directories (`node-agent/`, `credential-authz/`, `dispatcher/`, `agent-task/`)
 will be populated in subsequent stacked PRs — see the build order in `CLAUDE.md`.
 
-## Quick start (after Step 1)
+## Quick start (after Step 2)
 
 ```bash
-make cluster-up      # creates Kind cluster, installs Istio, applies our chart, runs smoke test
-make smoke-test      # re-runs the sidecar-injection verification
-make cluster-down    # deletes the Kind cluster
+# 1. Bring up Kind cluster + Istio + chart (credential-authz pods come up NotReady)
+make cluster-up
+
+# 2. Build the credential-authz image and load it into Kind
+make build-credential-authz-image
+
+# 3. Re-deploy the chart so it uses the just-built image
+make app-upgrade
+
+# 4. Create the Anthropic Secret separately (chart never sees the key)
+kubectl create secret generic anthropic-api-key \
+  --namespace=agent-system \
+  --from-literal=api-key="${ANTHROPIC_API_KEY:-sk-ant-stub-step-02-do-not-use}"
+
+# 5. Verify end-to-end: file watcher picks up Secret, gRPC contract returns x-api-key, rotation works without restart
+make test-credential-authz
+
+# Tear down
+make cluster-down
 ```
 
-Requirements: `kind`, `kubectl`, `helm` (v3+), `docker`.
+Requirements: `kind`, `kubectl`, `helm` (v3+), `docker`, `go` (1.23+), `grpcurl`.
+
+## Security guardrails (set up once)
+
+API keys leaking into git can cause runaway costs. We use defense in depth:
+
+**Layer 1 — `.gitignore` patterns** (already configured in this repo).
+
+**Layer 2 — pre-commit hook running [gitleaks](https://github.com/gitleaks/gitleaks)** (one-time setup, then automatic):
+
+```bash
+brew install pre-commit gitleaks    # macOS; equivalent on other OSes
+make install-pre-commit              # activates the hook
+```
+
+After this, every `git commit` scans staged changes and rejects secrets before they enter local history. Also: `make security-scan` runs gitleaks against the full working tree on demand.
+
+**Layer 3 — GitHub push protection** (one-time, ~2 min, server-side safety net):
+
+1. Open https://github.com/subganapathy/k8s-debug-agents/settings/security_analysis
+2. **Enable** "Secret scanning"
+3. **Enable** "Push protection"
+4. (Recommended) **Enable** "Require justification when bypassing push protection"
+
+When triggered, GitHub server-side rejects pushes containing recognized secret patterns (Anthropic, OpenAI, AWS, etc.).
+
+**Layer 4 — Anthropic dashboard limits** (one-time, ~5 min, blast-radius reduction):
+
+1. Console → Settings → Workspaces → create `dev-k8s-debug-agents`
+2. Workspace → Limits → set monthly cap (e.g. **$50** for dev) + email alerts at 25/50/75%
+3. API Keys → create dev-only key, scope to that workspace, save in a password manager
+4. Rotation runbook: revoke → create new → `kubectl create secret … --dry-run=client -o yaml | kubectl apply -f -` → file watcher picks up the new key without pod restart
 
 ## Install flow (dev and prod, same pattern)
 

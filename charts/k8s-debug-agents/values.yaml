@@ -38,7 +38,47 @@ nodeAgent:
   enabled: false           # Step 6 turns this on
 
 credentialAuthz:
-  enabled: false           # Step 2 turns this on
+  enabled: true            # Step 2 turned this on
+  replicas: 2
+
+  # Ports. `port` is the gRPC ext_authz endpoint Envoy talks to.
+  # `healthPort` is plain HTTP for /healthz + /readyz probes.
+  port: 9001
+  healthPort: 9002
+
+  # The Secret holding the Anthropic API key.
+  #
+  # IMPORTANT: this chart does NOT create the Secret. Create it externally:
+  #
+  #   kubectl create secret generic anthropic-api-key \
+  #     --namespace=agent-system \
+  #     --from-literal=api-key="$ANTHROPIC_API_KEY"
+  #
+  # Why: putting the API key in chart values (even encrypted via sops/helm-secrets)
+  # leaks it into `helm get values`, ArgoCD Application status, and other state
+  # surfaces. Keeping it only in the K8s Secret object minimizes that surface.
+  #
+  # The credential-authz pod stays NotReady (readinessProbe fails) until the
+  # Secret is created. `make app-install` before `kubectl create secret` is fine:
+  # pods come up, fsnotify-watch the empty mount dir, transition to Ready as
+  # soon as the Secret is created. Rotation works the same way at runtime —
+  # no pod restart.
+  secret:
+    name: anthropic-api-key
+    key: api-key
+
+  # Resource requests are tiny — credential-authz is a stateless gRPC service
+  # that returns a header. CPU is bursty at cold start (proto serdes), then
+  # near-zero. Memory is dominated by gRPC server buffers (~10MB) + Go runtime.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  logLevel: info           # debug | info | warn | error
 
 dispatcher:
   enabled: false           # Step 4 turns this on

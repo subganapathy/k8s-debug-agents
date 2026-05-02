@@ -32,5 +32,23 @@ charts/*/requirements.lock
 # Local dev
 .env
 .env.local
+.env.*
 kubeconfig-*
 *.kubeconfig
+
+# Secrets — Layer 1 of accidental-checkin defense.
+# Layer 2 = gitleaks pre-commit hook (.pre-commit-config.yaml).
+# Layer 3 = GitHub push protection (one-click in repo settings).
+# Layer 4 = Anthropic dashboard spend cap.
+# See README "Security guardrails" for the full setup.
+*.secret.yaml
+*.secret.yml
+secret-*.yaml
+secret-*.yml
+api-keys.yaml
+api-keys.yml
+*.pem
+*.key
+# Don't ignore Helm chart templates that legitimately use these names
+!charts/**/templates/**/*.yaml
+!charts/**/templates/**/*.yml

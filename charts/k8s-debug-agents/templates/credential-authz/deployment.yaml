@@ -1,0 +1,116 @@
+{{- if .Values.credentialAuthz.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: credential-authz
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/component: credential-authz
+spec:
+  replicas: {{ .Values.credentialAuthz.replicas }}
+  selector:
+    matchLabels:
+      {{- include "k8s-debug-agents.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: credential-authz
+  template:
+    metadata:
+      labels:
+        {{- include "k8s-debug-agents.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: credential-authz
+      annotations:
+        # Bumped by Helm on Secret rotation if we ever switch to env-var injection.
+        # Currently irrelevant (we read from file via fsnotify), but harmless to keep.
+        checksum/config: "n/a"
+    spec:
+      serviceAccountName: credential-authz
+      automountServiceAccountToken: true
+      securityContext:
+        # Pod-level security: non-root, fsGroup so mounted Secret files are
+        # readable by the runtime user.
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: credential-authz
+          image: {{ include "k8s-debug-agents.image" (dict "image" .Values.images.credentialAuthz "root" .) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - "--grpc-addr=:{{ .Values.credentialAuthz.port }}"
+            - "--health-addr=:{{ .Values.credentialAuthz.healthPort }}"
+            - "--secret-path=/etc/anthropic-secret/{{ .Values.credentialAuthz.secret.key }}"
+            - "--log-level={{ .Values.credentialAuthz.logLevel }}"
+          ports:
+            - name: grpc-authz
+              containerPort: {{ .Values.credentialAuthz.port }}
+              protocol: TCP
+            - name: http-health
+              containerPort: {{ .Values.credentialAuthz.healthPort }}
+              protocol: TCP
+          # Container-level security: zero capabilities, read-only rootfs.
+          # (We don't write to disk; the only mount is the read-only Secret.)
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # /healthz: process is alive
+          # /readyz: blocks until the API key has been loaded at least once
+          #          → pod is NotReady until the Secret exists.
+          # This is what enables "create the Secret in a separate step" — bring
+          # up the chart, then `kubectl create secret`, pod transitions to Ready
+          # within ~60s without restart.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http-health
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 1
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: {{ .Values.credentialAuthz.resources.requests.cpu | quote }}
+              memory: {{ .Values.credentialAuthz.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.credentialAuthz.resources.limits.cpu | quote }}
+              memory: {{ .Values.credentialAuthz.resources.limits.memory | quote }}
+          volumeMounts:
+            - name: anthropic-secret
+              mountPath: /etc/anthropic-secret
+              readOnly: true
+      volumes:
+        - name: anthropic-secret
+          secret:
+            secretName: {{ .Values.credentialAuthz.secret.name | quote }}
+            # optional: true means kubelet doesn't error if the Secret is missing
+            # at pod-start time. It mounts an empty directory, fsnotify watches
+            # the parent dir, and the loader picks up the file as soon as the
+            # Secret is created — exactly the "create Secret separately" flow.
+            optional: true
+            defaultMode: 0o400
+      # Anti-affinity: spread replicas across nodes for HA. With 2 replicas on
+      # a 4-node Kind cluster, both replicas land on different nodes. preferredDuringScheduling
+      # rather than required so single-node setups still work.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values: [credential-authz]
+                topologyKey: kubernetes.io/hostname
+{{- end -}}
