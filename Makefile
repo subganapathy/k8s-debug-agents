@@ -72,8 +72,25 @@ smoke-test: ## Re-run the sidecar-injection smoke test against the current clust
 	echo "OK: sidecar injected (containers: $$CONTAINERS)"
 
 # ─── Istio (generic — Kind and prod use the same targets) ──────────────────────
+# THREE Helm releases, in order: istio-base → istio-cni → istiod.
+#
+# Why istio-cni: it moves the iptables setup that the per-pod istio-init
+# container would normally do into a node-level CNI plugin DaemonSet. This
+# eliminates the privileged init container from user pods (which would
+# otherwise require CAP_NET_ADMIN + CAP_NET_RAW + runAsUser=0 — capabilities
+# forbidden by Pod Security Admission `baseline` and `restricted` profiles).
+#
+# Without istio-cni, every pod with sidecar injection cannot satisfy hardened
+# PSA. With istio-cni, user pods are clean and we can enforce `restricted`
+# in agent-system. The privileged work consolidates to one DaemonSet pod per
+# node in istio-system.
+#
+# istiod is configured with `pilot.cni.enabled=true` so it knows the CNI
+# plugin will handle iptables setup and skips injecting the istio-init
+# container into pods.
+
 .PHONY: istio-install
-istio-install: ## Install Istio (istio-base + istiod) via Helm — two separate releases
+istio-install: ## Install Istio (istio-base + istio-cni + istiod) via Helm — three separate releases
 	@echo ">> Adding Istio Helm repo"
 	helm repo add istio $(ISTIO_REPO_URL) --force-update
 	helm repo update istio
@@ -82,10 +99,18 @@ istio-install: ## Install Istio (istio-base + istiod) via Helm — two separate 
 	  --version $(ISTIO_VERSION) \
 	  --namespace $(ISTIO_NAMESPACE) --create-namespace \
 	  --wait
+	@echo ">> Installing istio-cni ($(ISTIO_VERSION)) into $(ISTIO_NAMESPACE)"
+	@echo ">> (eliminates the privileged istio-init container in user pods)"
+	helm upgrade --install istio-cni istio/cni \
+	  --version $(ISTIO_VERSION) \
+	  --namespace $(ISTIO_NAMESPACE) \
+	  --wait
 	@echo ">> Installing istiod ($(ISTIO_VERSION)) into $(ISTIO_NAMESPACE)"
+	@echo ">> (pilot.cni.enabled=true tells istiod to skip injecting istio-init)"
 	helm upgrade --install istiod istio/istiod \
 	  --version $(ISTIO_VERSION) \
 	  --namespace $(ISTIO_NAMESPACE) \
+	  --set pilot.cni.enabled=true \
 	  --wait
 
 .PHONY: istio-upgrade
@@ -101,16 +126,24 @@ istio-upgrade: ## Upgrade Istio — requires VERSION=x.y.z. Uses SSA on new CRDs
 	  --version $(VERSION) \
 	  --namespace $(ISTIO_NAMESPACE) \
 	  --wait
+	@echo ">> Bumping istio-cni to $(VERSION)"
+	helm upgrade istio-cni istio/cni \
+	  --version $(VERSION) \
+	  --namespace $(ISTIO_NAMESPACE) \
+	  --wait
 	@echo ">> Bumping istiod to $(VERSION)"
 	helm upgrade istiod istio/istiod \
 	  --version $(VERSION) \
 	  --namespace $(ISTIO_NAMESPACE) \
+	  --set pilot.cni.enabled=true \
 	  --wait
 
 .PHONY: istio-uninstall
-istio-uninstall: ## Uninstall Istio (istiod first, then istio-base)
+istio-uninstall: ## Uninstall Istio (istiod first, then istio-cni, then istio-base — reverse install order)
 	@echo ">> Uninstalling istiod"
 	-helm uninstall istiod --namespace $(ISTIO_NAMESPACE)
+	@echo ">> Uninstalling istio-cni"
+	-helm uninstall istio-cni --namespace $(ISTIO_NAMESPACE)
 	@echo ">> Uninstalling istio-base"
 	-helm uninstall istio-base --namespace $(ISTIO_NAMESPACE)
 	@echo ">> Note: CRDs are intentionally NOT deleted — would cascade-delete all Istio CRs cluster-wide."

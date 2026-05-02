@@ -1,7 +1,18 @@
 # A trivial pod used solely to verify that Istio sidecar injection works in
-# the agent-system namespace. The 'pause' image from K8s is about 700KB, does
-# nothing, and always has its container named after the pod — which lets us
-# assert that kubectl sees exactly 2 containers (smoke-test + istio-proxy).
+# the agent-system namespace. The `pause` image is the smallest possible
+# container (~700KB), runs forever, does nothing — its container is always
+# named after the pod, so we assert that kubectl sees exactly 2 containers
+# (smoke-test + istio-proxy).
+#
+# securityContext satisfies the PSA `restricted` profile so this pod can be
+# admitted in the agent-system namespace (which enforces `restricted`):
+#   - runs as non-root (UID 65532, the well-known nonroot UID)
+#   - drops ALL capabilities
+#   - readOnlyRootFilesystem (pause writes nothing)
+#   - allowPrivilegeEscalation=false
+#   - RuntimeDefault seccomp profile
+# These settings are minimum to pass `restricted`; not the smallest possible
+# pod spec.
 #
 # This pod is deleted at the start of every smoke test (see setup.sh).
 
@@ -14,6 +25,13 @@ metadata:
     app: smoke-test
     purpose: sidecar-injection-verification
 spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: smoke-test
       image: registry.k8s.io/pause:3.10
@@ -24,3 +42,8 @@ spec:
         limits:
           cpu: 50m
           memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]

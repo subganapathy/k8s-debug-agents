@@ -8,7 +8,8 @@
 
 namespace:
   # The namespace this chart's workloads run in. Helm's --namespace flag creates
-  # the namespace; this template also ensures the istio-injection label is set.
+  # the namespace; this template also ensures the istio-injection label and
+  # Pod Security Admission labels are set.
   name: agent-system
 
   # Set to true to have Istio's sidecar injector mutate pods in this namespace.
@@ -16,6 +17,43 @@ namespace:
   # ext_authz). Only reason to set false: you're installing this chart outside
   # the mesh for a test that doesn't exercise the credential path.
   istioInjection: true
+
+  # Pod Security Admission — see https://kubernetes.io/docs/concepts/security/pod-security-standards/
+  #
+  # Three independent levels:
+  #   enforce — pods that violate the policy are REJECTED at admission time
+  #   audit   — violations are logged to the API server's audit log
+  #   warn    — violations return a warning message to the kubectl/client user
+  #
+  # Three policy profiles (increasing strictness):
+  #   privileged — no restrictions (cluster default if no label set)
+  #   baseline   — bans the obviously-dangerous (privileged: true, hostNetwork,
+  #                hostPath, capabilities beyond default Docker set)
+  #   restricted — strict hardening: non-root, drop ALL capabilities,
+  #                RuntimeDefault seccomp, no privilege escalation, etc.
+  #
+  # We default to `restricted` enforcement. credential-authz already conforms
+  # (non-root UID 65532, dropped ALL capabilities, RuntimeDefault seccomp,
+  # readOnlyRootFilesystem, no privilege escalation). Future components must
+  # conform too — restricted is the project's security baseline for this
+  # namespace.
+  #
+  # IMPORTANT: this requires Istio CNI mode. Without istio-cni, every pod with
+  # sidecar injection gets a privileged istio-init container that violates
+  # restricted (and even baseline). `make istio-install` installs istio-cni;
+  # if you're using a different Istio install path, ensure CNI mode is on.
+  #
+  # If you're running into restricted-profile rejections from a sidecar pod,
+  # the most likely cause is that istio-cni isn't installed. Override to
+  # `baseline` or `privileged` ONLY as a last resort, and fix the underlying
+  # Istio install instead.
+  podSecurity:
+    enforce:        restricted
+    audit:          restricted
+    warn:           restricted
+    enforceVersion: latest
+    auditVersion:   latest
+    warnVersion:    latest
 
 # ─── Image references ──────────────────────────────────────────────────────────
 # All component images. Registry is an org-level override (empty string = local
