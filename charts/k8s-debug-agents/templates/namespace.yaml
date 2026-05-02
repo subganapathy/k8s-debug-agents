@@ -1,12 +1,20 @@
 {{/*
-Creates the agent-system namespace and labels it for Istio sidecar injection.
+Creates the agent-system namespace and labels it for:
+  - Istio sidecar injection (`istio-injection: enabled`)
+  - Pod Security Admission (the `pod-security.kubernetes.io/*` labels)
 
 Why this is in the chart (and not just --create-namespace on helm install):
-- --create-namespace doesn't set labels, so sidecar injection wouldn't apply to
-  pods in the namespace without a second kubectl step.
+- --create-namespace doesn't set labels, so sidecar injection + PSA enforcement
+  wouldn't apply without a second kubectl step.
 - Making the namespace declarative + part of the chart is GitOps-friendly —
-  ArgoCD / Flux can reconcile the label if something drifts.
+  ArgoCD / Flux can reconcile the labels if something drifts.
 - Idempotent: Helm owns this resource; re-sync is a no-op when state matches.
+
+PSA enforces a `restricted` profile by default. The credential-authz Deployment
+is designed to satisfy this — non-root UID, drop ALL capabilities, read-only
+rootfs, RuntimeDefault seccomp, no host namespaces. Future components must
+either conform or get a documented exception (which would mean either weakening
+this policy or running them in a separate namespace with a relaxed profile).
 */}}
 apiVersion: v1
 kind: Namespace
@@ -16,6 +24,24 @@ metadata:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
     {{- if .Values.namespace.istioInjection }}
     istio-injection: enabled
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.enforceVersion }}
+    pod-security.kubernetes.io/enforce-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.audit }}
+    pod-security.kubernetes.io/audit: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.auditVersion }}
+    pod-security.kubernetes.io/audit-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.warn }}
+    pod-security.kubernetes.io/warn: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.namespace.podSecurity.warnVersion }}
+    pod-security.kubernetes.io/warn-version: {{ . | quote }}
     {{- end }}
   {{- with .Values.global.annotations }}
   annotations:
