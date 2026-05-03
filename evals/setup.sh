@@ -46,7 +46,18 @@ fi
 # explicit so we fail loud if someone has a different context set by hand).
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 
-# ─── 2. Install Istio via Helm (two separate releases) ─────────────────────────
+# ─── 2. Install Istio via Helm (THREE separate releases) ──────────────────────
+# Order matters: istio-base (CRDs) → istio-cni (CNI plugin DaemonSet) → istiod
+# (control plane, configured to skip istio-init container injection).
+#
+# Why three not two: istio-cni eliminates the privileged per-pod istio-init
+# container so user namespaces can enforce hardened Pod Security Admission
+# (restricted profile). Without it, every pod with sidecar injection requires
+# CAP_NET_ADMIN + CAP_NET_RAW + runAsUser=0 in its init container — capabilities
+# that PSA `baseline` and `restricted` profiles forbid.
+#
+# pilot.cni.enabled=true on istiod tells the sidecar injector to skip
+# istio-init since the CNI plugin handles iptables setup at the node level.
 echo "==> Adding Istio Helm repo"
 helm repo add istio https://istio-release.storage.googleapis.com/charts --force-update >/dev/null
 helm repo update istio >/dev/null
@@ -57,10 +68,17 @@ helm upgrade --install istio-base istio/base \
   --namespace "${ISTIO_NAMESPACE}" --create-namespace \
   --wait
 
+echo "==> Installing istio-cni ${ISTIO_VERSION} into ${ISTIO_NAMESPACE}"
+helm upgrade --install istio-cni istio/cni \
+  --version "${ISTIO_VERSION}" \
+  --namespace "${ISTIO_NAMESPACE}" \
+  --wait
+
 echo "==> Installing istiod ${ISTIO_VERSION} into ${ISTIO_NAMESPACE}"
 helm upgrade --install istiod istio/istiod \
   --version "${ISTIO_VERSION}" \
   --namespace "${ISTIO_NAMESPACE}" \
+  --set pilot.cni.enabled=true \
   --wait
 
 # ─── 3. Install our chart (creates agent-system namespace with injection label) ─
