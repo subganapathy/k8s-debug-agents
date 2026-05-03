@@ -1,0 +1,51 @@
+{{/*
+Creates the agent-platform namespace — long-running infrastructure components.
+
+Hosts:
+  - credential-authz (Step 2)
+  - dispatcher       (Step 4, planned)
+  - token-tracker    (Step 6.5, planned)
+
+Labels applied:
+  - istio-injection: enabled                (sidecar injection for mTLS + ext_authz egress)
+  - pod-security.kubernetes.io/{enforce,audit,warn}: restricted
+                                            (PSA restricted; istio-cni eliminates the
+                                            istio-init capability blocker — see PR #4)
+
+This namespace and `agent-tasks` (the sibling, see tasks-namespace.yaml) intentionally
+have IDENTICAL security posture. The split is operational/policy-clarity, not
+differential security. Long-running infra goes here; ephemeral Job pods (workloads)
+go in `agent-tasks`.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.platformNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of-namespace: platform
+    {{- if .Values.platformNamespace.istioInjection }}
+    istio-injection: enabled
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.enforceVersion }}
+    pod-security.kubernetes.io/enforce-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.audit }}
+    pod-security.kubernetes.io/audit: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.auditVersion }}
+    pod-security.kubernetes.io/audit-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.warn }}
+    pod-security.kubernetes.io/warn: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.platformNamespace.podSecurity.warnVersion }}
+    pod-security.kubernetes.io/warn-version: {{ . | quote }}
+    {{- end }}
+  {{- with .Values.global.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}

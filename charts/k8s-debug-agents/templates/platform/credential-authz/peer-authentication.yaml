@@ -1,0 +1,48 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+PeerAuthentication: STRICT mTLS in both agent-platform and agent-tasks.
+
+What this does at the kernel/Envoy level:
+- Each pod's istio-proxy (Envoy sidecar) holds a short-lived (~24h) X.509
+  certificate provisioned by istiod, with the SPIFFE identity:
+    spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>
+- "STRICT" mode means: for any traffic coming INTO a pod in this namespace,
+  the sidecar will REQUIRE mTLS — plaintext connections are rejected at the
+  TLS handshake. The peer must present a valid mesh certificate.
+- Outbound traffic from these pods to other mesh services is also automatically
+  mTLS-encrypted (the sidecars on both ends negotiate TLS using their
+  istiod-provisioned certs).
+- For traffic LEAVING the mesh (to external services like api.anthropic.com),
+  TLS termination happens via DestinationRule's `tls.mode: SIMPLE` — Envoy
+  originates outbound TLS to the external endpoint.
+
+Why STRICT not PERMISSIVE: PERMISSIVE allows BOTH mTLS and plaintext, which
+is meant for migration scenarios where some workloads aren't yet meshed. We
+control all workloads in agent-platform and agent-tasks; STRICT is correct.
+
+Note: this resource is in agent-platform namespace but applies cluster-wide
+to namespaces with Istio injection. We create one per namespace for
+explicitness.
+*/}}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls-platform
+  namespace: {{ .Values.platformNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: strict-mtls-tasks
+  namespace: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  mtls:
+    mode: STRICT
+{{- end -}}

@@ -1,0 +1,53 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+DestinationRule: configure the sidecar's behavior when sending traffic to
+api.anthropic.com — specifically, originate TLS from sidecar to Anthropic.
+
+The full request lifecycle this enables:
+
+  1. agent-task container makes HTTP POST to http://api.anthropic.com/v1/messages
+     (HTTP, not HTTPS — important so that Envoy can L7-inspect headers)
+  2. iptables (set up by istio-cni) redirects the outbound TCP connection
+     to istio-proxy at 127.0.0.1:15001 in the pod's netns
+  3. istio-proxy receives plaintext HTTP request
+  4. ext_authz filter (configured by envoy-filter.yaml) calls credential-authz
+     to inject the x-api-key header
+  5. Envoy looks up routing for api.anthropic.com via the ServiceEntry
+  6. THIS DestinationRule kicks in: tls.mode=SIMPLE means "originate TLS
+     when sending to this destination." Envoy:
+        - Initiates a TLS handshake with api.anthropic.com:443
+        - Uses SNI=api.anthropic.com so the server presents the right cert
+        - Validates the cert against the system trust store
+        - Sends the (now-augmented) HTTP request over the TLS connection
+  7. Anthropic receives a normal HTTPS request with the x-api-key header
+
+Why this works: the application sends plaintext HTTP, Envoy can inspect
+and modify it, then Envoy encrypts before the bytes leave the node. The
+plaintext window is confined to localhost in the pod's netns — never on
+the wire.
+
+`sni: api.anthropic.com` is critical: without SNI, Anthropic's load
+balancer wouldn't know which TLS cert to present (CDNs serve many domains
+from the same IP). This explicitly tells Envoy what to put in the TLS
+ClientHello's Server Name Indication extension.
+*/}}
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: anthropic-api-tls-origination
+  namespace: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  host: api.anthropic.com
+  trafficPolicy:
+    portLevelSettings:
+      # TLS origination is configured on port 443 (the upstream port).
+      # The VirtualService (virtual-service.yaml) rewrites port-80 traffic
+      # to route through this 443 cluster, where TLS gets originated.
+      - port:
+          number: 443
+        tls:
+          mode: SIMPLE
+          sni: api.anthropic.com
+{{- end -}}

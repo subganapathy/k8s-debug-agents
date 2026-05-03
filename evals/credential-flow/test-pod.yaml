@@ -1,0 +1,122 @@
+# evals/credential-flow/test-pod.yaml
+#
+# Step 3 end-to-end verification artifact.
+#
+# A "fake agent-task" pod that:
+#   1. Lives in agent-tasks (so the EnvoyFilter targeting agent-task workloads applies)
+#   2. Has the app.kubernetes.io/component=agent-task label (matches workloadSelector)
+#   3. Uses a dedicated ServiceAccount (mTLS identity for AuthorizationPolicy)
+#   4. Runs curl in a loop, calling http://api.anthropic.com with a placeholder
+#      x-api-key header
+#
+# What we expect to happen:
+#   - The application sends HTTP POST to api.anthropic.com:80 with x-api-key=PLACEHOLDER
+#   - Pod's istio-proxy intercepts (iptables redirect set up by istio-cni)
+#   - ext_authz filter calls credential-authz; credential-authz returns x-api-key=<real>
+#   - Envoy overwrites the placeholder header
+#   - DestinationRule originates TLS to api.anthropic.com:443
+#   - Anthropic receives the request with the real key
+#
+# If the Secret is a real Anthropic key: response is 200 OK
+# If the Secret is a stub (sk-ant-stub-...): response is 401 with Anthropic error
+#   ("Invalid API key" or similar) — proves injection happened, just with a fake key.
+# If injection fails:                       response is 401 with the Anthropic error
+#   AND we see the placeholder echoed back in error context (some APIs do this).
+#   OR the request is rejected at ext_authz (failure_mode_allow=false).
+#
+# So the test asserts: status code != 0 AND credential-authz logs show a Check call
+# AND (success | acceptable-injection-with-fake-key).
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: credential-flow-test
+  namespace: agent-tasks
+  labels:
+    app.kubernetes.io/name: k8s-debug-agents
+    app.kubernetes.io/component: agent-task
+    app.kubernetes.io/part-of: k8s-debug-agents
+    purpose: credential-flow-verification
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: credential-flow-test
+  namespace: agent-tasks
+  labels:
+    # MUST have this label — the EnvoyFilter's workloadSelector matches it.
+    # Without it, no ext_authz, no header injection.
+    app.kubernetes.io/component: agent-task
+    app.kubernetes.io/part-of: k8s-debug-agents
+    app.kubernetes.io/name: k8s-debug-agents
+    purpose: credential-flow-verification
+spec:
+  serviceAccountName: credential-flow-test
+  restartPolicy: Never
+  # PSA restricted requires all of the following at pod or container level:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: tester
+      image: curlimages/curl:8.10.1
+      # The image's default user is `curl_user` (uid 1000). With our pod
+      # securityContext.runAsUser=65532, we override that — runs as 65532
+      # which is fine because the curl binary is world-executable.
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          # The application starts before its sidecar's Envoy has received
+          # xDS config from istiod (~5-15s). If we curl immediately, the
+          # listener config isn't ready and the connection fails. Retry
+          # loop until we see ANY response from upstream (non-000 status =
+          # Envoy listener handled the request) or 30s elapse.
+          echo ">>> Waiting for Envoy sidecar to be xDS-ready (probing api.anthropic.com)..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' http://api.anthropic.com/v1/messages 2>/dev/null)
+            # curl emits "000" when it can't connect; any other 3-digit means
+            # the request reached upstream (response status from Anthropic).
+            case "$STATUS" in
+              ""|"000") sleep 1 ;;
+              *)        echo ">>> Envoy ready after $i probe(s) (got HTTP $STATUS)"; break ;;
+            esac
+          done
+
+          echo ""
+          echo ">>> Now sending the real test: POST with placeholder x-api-key"
+          echo ">>> If credential injection works, Envoy will replace the placeholder"
+          echo ">>> with the real key from credential-authz before forwarding."
+          echo ""
+          # -v: verbose (show request + response headers)
+          # -s: hide progress meter
+          # -w: print status code on its own line at the end
+          # http:// (not https://) — required so Envoy can L7-inspect
+          curl -v -s --max-time 30 \
+            -w '\nHTTP_STATUS=%{http_code}\n' \
+            -X POST \
+            -H 'x-api-key: PLACEHOLDER-DO-NOT-USE' \
+            -H 'anthropic-version: 2023-06-01' \
+            -H 'content-type: application/json' \
+            -d '{"model":"claude-haiku-4-5","max_tokens":16,"messages":[{"role":"user","content":"Say only the word OK."}]}' \
+            http://api.anthropic.com/v1/messages || echo "(curl exited non-zero — container will keep running for debugging)"
+          echo ""
+          echo ">>> Done. Sleeping for 1800s so the operator can inspect logs and exec in."
+          sleep 1800
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]

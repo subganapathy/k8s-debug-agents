@@ -1,0 +1,50 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+ServiceEntry: declares api.anthropic.com as a known external destination.
+
+Why we need this: Istio's sidecar by default refuses to route traffic to
+hosts it doesn't know about (mode REGISTRY_ONLY) or routes them as opaque
+TCP without applying mesh policies (mode ALLOW_ANY, default). To apply our
+ext_authz EnvoyFilter and DestinationRule's TLS origination to outbound
+traffic, the destination has to be in Istio's service registry — that's
+what ServiceEntry does for external services.
+
+Located in agent-tasks namespace because that's where the calling pods
+(agent-task variants) live. ServiceEntry is namespace-scoped by default,
+so it's only visible to sidecars in agent-tasks.
+
+The two ports:
+- 80 (http):  the port the application TALKS TO (inside the pod's netns,
+              before Envoy intercepts). The Anthropic SDK is configured to
+              use base_url with HTTP, not HTTPS — this is how we get Envoy
+              to do L7 inspection (ext_authz needs plaintext headers).
+- 443 (https): the actual external port on Anthropic's side. The
+              DestinationRule originates TLS to this port.
+
+resolution: DNS — Envoy resolves api.anthropic.com via DNS (default
+nameservers from the host) and rotates through the resolved IPs.
+
+location: MESH_EXTERNAL — explicitly marks this as outside-the-mesh,
+which affects how mTLS is negotiated (we use SIMPLE TLS to external,
+mTLS within the mesh).
+*/}}
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: anthropic-api
+  namespace: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - api.anthropic.com
+  ports:
+    - number: 80
+      name: http
+      protocol: HTTP
+    - number: 443
+      name: https
+      protocol: HTTPS
+  resolution: DNS
+  location: MESH_EXTERNAL
+{{- end -}}

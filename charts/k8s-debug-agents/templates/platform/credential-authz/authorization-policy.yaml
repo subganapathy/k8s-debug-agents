@@ -1,0 +1,61 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+AuthorizationPolicy: lock down who can call credential-authz.
+
+This is the L7 mesh-level access control sitting on top of mTLS. Even if
+an attacker gets onto the mesh (compromised pod with valid mTLS cert),
+this policy limits which SAs are allowed to invoke the credential-authz
+gRPC service.
+
+How Istio enforces this: each AuthorizationPolicy is compiled into RBAC
+rules that the Envoy sidecar in front of credential-authz checks BEFORE
+forwarding the request to the application. The check happens at the
+inbound filter chain on credential-authz's sidecar:
+
+  Inbound request to credential-authz pod
+       │
+       ↓ (mTLS handshake — peer cert validated against istiod's CA)
+  ┌─ credential-authz sidecar inbound listener ─────────────────────┐
+  │  PeerAuthentication(STRICT) check: cert valid, peer in mesh     │
+  │  AuthorizationPolicy check (this resource):                     │
+  │    Is the peer's SPIFFE identity allowed?                       │
+  │    Is the destination port allowed?                             │
+  │    If yes → forward to credential-authz container               │
+  │    If no  → return 403 (RBAC: access denied)                    │
+  └─────────────────────────────────────────────────────────────────┘
+
+The peer's identity comes from its mTLS client certificate (provisioned
+by istiod). Format:
+  spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount-name>
+
+Step 3 scope: allow ANY pod in agent-tasks namespace to call (not yet
+filtered by SA name pattern). This is intentional — Step 4 (dispatcher)
+will create per-task ServiceAccounts named like agent-task-<id>, and at
+that point we can tighten this to a wildcard match like
+`agent-task-*`. For now, namespace-level matching is sufficient.
+
+A separate DENY policy isn't needed: AuthorizationPolicy is allow-list
+by default. Without a matching ALLOW rule, traffic is denied.
+*/}}
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: credential-authz-allow-tasks
+  namespace: {{ .Values.platformNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: credential-authz
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces:
+              - {{ .Values.tasksNamespace.name | quote }}
+      to:
+        - operation:
+            ports:
+              - {{ .Values.credentialAuthz.port | quote }}
+{{- end -}}

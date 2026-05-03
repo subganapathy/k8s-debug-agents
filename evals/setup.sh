@@ -11,7 +11,8 @@ set -euo pipefail
 # ─── Config (inherits from Makefile, with sane defaults if run standalone) ─────
 CLUSTER_NAME="${CLUSTER_NAME:-debug-agent}"
 ISTIO_VERSION="${ISTIO_VERSION:-1.24.2}"
-AGENT_NAMESPACE="${AGENT_NAMESPACE:-agent-system}"
+PLATFORM_NAMESPACE="${PLATFORM_NAMESPACE:-agent-platform}"
+TASKS_NAMESPACE="${TASKS_NAMESPACE:-agent-tasks}"
 ISTIO_NAMESPACE="${ISTIO_NAMESPACE:-istio-system}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,24 +82,27 @@ helm upgrade --install istiod istio/istiod \
   --set pilot.cni.enabled=true \
   --wait
 
-# ─── 3. Install our chart (creates agent-system namespace with injection label) ─
-echo "==> Installing k8s-debug-agents chart"
+# ─── 3. Install our chart (creates agent-platform + agent-tasks namespaces) ────
+# Helm release lives in agent-platform; the chart's tasks-namespace.yaml template
+# creates agent-tasks alongside it. Both namespaces get PSA restricted + Istio
+# injection labels.
+echo "==> Installing k8s-debug-agents chart (Helm release in ${PLATFORM_NAMESPACE})"
 helm upgrade --install k8s-debug-agents "${CHART_DIR}" \
   -f "${VALUES_FILE}" \
-  --namespace "${AGENT_NAMESPACE}" --create-namespace \
+  --namespace "${PLATFORM_NAMESPACE}" --create-namespace \
   --wait
 
-# ─── 4. Smoke test: deploy a pod, verify it got a sidecar ──────────────────────
-echo "==> Smoke test: verifying sidecar injection works in ${AGENT_NAMESPACE}"
+# ─── 4. Smoke test: deploy a pod into agent-tasks, verify sidecar injection ────
+echo "==> Smoke test: verifying sidecar injection works in ${TASKS_NAMESPACE}"
 
 # Clean up any stale smoke pod (idempotency)
-kubectl delete pod smoke-test -n "${AGENT_NAMESPACE}" --ignore-not-found --wait=true >/dev/null
+kubectl delete pod smoke-test -n "${TASKS_NAMESPACE}" --ignore-not-found --wait=true >/dev/null
 
 kubectl apply -f "${SCRIPT_DIR}/smoke-test/pod.yaml"
 kubectl wait --for=condition=Ready pod/smoke-test \
-  -n "${AGENT_NAMESPACE}" --timeout=60s
+  -n "${TASKS_NAMESPACE}" --timeout=60s
 
-CONTAINERS=$(kubectl get pod smoke-test -n "${AGENT_NAMESPACE}" \
+CONTAINERS=$(kubectl get pod smoke-test -n "${TASKS_NAMESPACE}" \
   -o jsonpath='{.spec.containers[*].name}')
 COUNT=$(echo "${CONTAINERS}" | wc -w | tr -d ' ')
 
@@ -108,7 +112,7 @@ if [[ "${COUNT}" != "2" ]]; then
   echo "      containers: ${CONTAINERS}"
   echo ""
   echo "      Common cause: namespace missing 'istio-injection=enabled' label"
-  echo "      Check:       kubectl get ns ${AGENT_NAMESPACE} --show-labels"
+  echo "      Check:       kubectl get ns ${TASKS_NAMESPACE} --show-labels"
   exit 1
 fi
 
@@ -118,5 +122,5 @@ echo ""
 echo "==> Done."
 echo ""
 echo "Next:"
-echo "  kubectl get pod smoke-test -n ${AGENT_NAMESPACE}"
+echo "  kubectl get pod smoke-test -n ${TASKS_NAMESPACE}"
 echo "  make cluster-down    # when you're done"

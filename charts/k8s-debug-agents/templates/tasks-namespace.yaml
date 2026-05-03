@@ -1,0 +1,48 @@
+{{/*
+Creates the agent-tasks namespace — ephemeral Job pods only.
+
+Hosts:
+  - agent-task Job pods (created at runtime by the dispatcher when alerts fire)
+
+This namespace has NO chart-managed workloads. The chart manages:
+  - The namespace itself + its labels (Istio injection, PSA)
+  - Istio resources (ServiceEntry, DestinationRule, EnvoyFilter, Sidecar) that
+    govern outbound traffic from agent-task pods to api.anthropic.com via
+    credential-authz (in agent-platform)
+
+Pods themselves are runtime artifacts created by the dispatcher.
+
+Same security posture as agent-platform: PSA restricted + Istio injection.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of-namespace: tasks
+    {{- if .Values.tasksNamespace.istioInjection }}
+    istio-injection: enabled
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.enforce }}
+    pod-security.kubernetes.io/enforce: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.enforceVersion }}
+    pod-security.kubernetes.io/enforce-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.audit }}
+    pod-security.kubernetes.io/audit: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.auditVersion }}
+    pod-security.kubernetes.io/audit-version: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.warn }}
+    pod-security.kubernetes.io/warn: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.tasksNamespace.podSecurity.warnVersion }}
+    pod-security.kubernetes.io/warn-version: {{ . | quote }}
+    {{- end }}
+  {{- with .Values.global.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
