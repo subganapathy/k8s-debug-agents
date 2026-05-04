@@ -54,14 +54,21 @@ error, the request is REJECTED. Failing closed is correct here — we don't
 want a degraded credential-authz to result in unauthenticated requests
 reaching Anthropic.
 
-Note on the cluster_name format: when an EnvoyFilter adds a cluster for
-ext_authz, its name is the bare string we set ("credential-authz"). When
-the same destination is referenced as an Istio service (e.g., from the
-agent-task SDK), it'd use the format "outbound|9001||credential-authz.
-agent-platform.svc.cluster.local" — that's Istio's auto-generated cluster
-name. We use a custom cluster (not the auto-generated one) because Istio's
-auto-generated cluster doesn't have HTTP/2 enabled by default, and gRPC
-requires HTTP/2.
+Cluster naming: we reference Istio's AUTO-GENERATED cluster name, not a
+custom one. The format is:
+  outbound|<port>||<service>.<namespace>.svc.cluster.local
+
+Why we use the auto-generated cluster instead of adding our own:
+  - mTLS to upstream is configured automatically (Istio's transport_socket
+    points at istiod's SDS for cert provisioning)
+  - HTTP/2 is enabled because the credential-authz Service's port is named
+    `grpc-authz` (the `grpc-` prefix triggers Istio's protocol auto-detection)
+  - DNS / endpoint resolution happens via Istio's normal CDS/EDS
+
+Adding a custom cluster (the previous approach) skipped Istio's transport_
+socket config and tried plaintext to a STRICT-mTLS namespace — which gets
+rejected silently and produces UAEX (ext_authz failure) from the caller's
+side. Don't do that.
 */}}
 apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
@@ -75,33 +82,9 @@ spec:
     labels:
       app.kubernetes.io/component: agent-task
   configPatches:
-    # 1. Add a cluster pointing at credential-authz, configured for HTTP/2 (gRPC).
-    - applyTo: CLUSTER
-      match:
-        context: SIDECAR_OUTBOUND
-      patch:
-        operation: ADD
-        value:
-          name: credential-authz
-          type: STRICT_DNS
-          lb_policy: ROUND_ROBIN
-          connect_timeout: 0.5s
-          typed_extension_protocol_options:
-            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
-              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
-              explicit_http_config:
-                http2_protocol_options: {}
-          load_assignment:
-            cluster_name: credential-authz
-            endpoints:
-              - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: credential-authz.{{ .Values.platformNamespace.name }}.svc.cluster.local
-                          port_value: {{ .Values.credentialAuthz.port }}
-
-    # 2. Insert the ext_authz filter into the outbound HTTP filter chain.
+    # Insert the ext_authz filter into the outbound HTTP filter chain.
+    # Istio's auto-generated cluster handles mTLS + HTTP/2 (the latter
+    # because credential-authz's Service port is named grpc-authz).
     - applyTo: HTTP_FILTER
       match:
         context: SIDECAR_OUTBOUND
@@ -120,7 +103,17 @@ spec:
             transport_api_version: V3
             grpc_service:
               envoy_grpc:
-                cluster_name: credential-authz
+                cluster_name: outbound|{{ .Values.credentialAuthz.port }}||credential-authz.{{ .Values.platformNamespace.name }}.svc.cluster.local
+                # CRITICAL: must set `authority` explicitly when the cluster
+                # name contains pipe characters (Istio's auto-generated
+                # cluster naming format). Without this, Envoy uses the bare
+                # cluster_name as the HTTP/2 `:authority` pseudo-header,
+                # which credential-authz's sidecar rejects as invalid HTTP/2
+                # (pipes aren't valid in :authority per RFC 7540), closing
+                # the connection. Symptom: rq_error count rises, but no
+                # RBAC stats fire on credential-authz side; istio-proxy
+                # debug log shows "Invalid HTTP header field was received".
+                authority: credential-authz.{{ .Values.platformNamespace.name }}.svc.cluster.local
               timeout: 2s
             failure_mode_allow: false
             # Body is NOT forwarded to credential-authz: with_request_body is

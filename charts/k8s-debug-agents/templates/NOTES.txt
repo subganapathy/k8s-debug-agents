@@ -15,10 +15,34 @@ Components enabled:
   dispatcher       : {{ .Values.dispatcher.enabled }}      (in {{ .Values.platformNamespace.name }}; planned Step 4)
   node-agent       : {{ .Values.nodeAgent.enabled }}      (in agent-node-system; planned Step 6)
 
-Verify the credential flow end-to-end (Step 3 verification):
-  kubectl create secret generic anthropic-api-key -n {{ .Values.platformNamespace.name }} \
-    --from-literal=api-key="${ANTHROPIC_API_KEY:-sk-ant-stub-step-03-do-not-use}"
+Create / rotate the Anthropic API Secret. ALWAYS strip trailing whitespace —
+clipboard-pasted keys often carry a trailing newline that breaks Anthropic's
+validation:
+
+  # If the key is in your shell env:
+  printf '%s' "$ANTHROPIC_API_KEY" \
+    | tr -d '\n\r' \
+    | kubectl create secret generic anthropic-api-key \
+        -n {{ .Values.platformNamespace.name }} \
+        --from-file=api-key=/dev/stdin \
+        --dry-run=client -o yaml \
+    | kubectl apply -f -
+
+  # Or if the key is in macOS Keychain:
+  security find-generic-password -a "$USER" -s "anthropic-api-key" -w \
+    | tr -d '\n\r' \
+    | kubectl create secret generic anthropic-api-key \
+        -n {{ .Values.platformNamespace.name }} \
+        --from-file=api-key=/dev/stdin \
+        --dry-run=client -o yaml \
+    | kubectl apply -f -
+
+credential-authz's fsnotify loader picks up the rotation within a few seconds
+of kubelet's projected-Secret sync (~60s worst case). No pod restart needed.
+
+Then run the end-to-end verification (Step 3):
   make test-credential-flow
+  # Expect: HTTP_STATUS=200 (real key) or HTTP_STATUS=401 (key invalid)
 
 Verify Istio sidecar injection in the tasks namespace:
   kubectl apply -f evals/smoke-test/pod.yaml
