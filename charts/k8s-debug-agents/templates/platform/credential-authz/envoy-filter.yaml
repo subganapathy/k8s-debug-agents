@@ -1,0 +1,123 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+EnvoyFilter: wires the ext_authz filter into the outbound HTTP filter chain
+of every agent-task pod's sidecar. This is the core of the credential
+injection mechanism.
+
+How an Envoy listener processes a request, with our filter inserted:
+
+  Outbound HTTP request from agent-task code
+       │
+       ↓ (iptables intercepts, redirects to istio-proxy:15001)
+  ┌─ istio-proxy (Envoy) outbound listener ────────────────────────────┐
+  │  Network filter chain:                                              │
+  │    - tls_inspector / http_connection_manager                        │
+  │  HTTP filter chain (inside http_connection_manager):                │
+  │    - envoy.filters.http.ext_authz   ← we insert this here           │
+  │    - envoy.filters.http.fault       (default Istio chain)           │
+  │    - envoy.filters.http.cors                                        │
+  │    - envoy.filters.http.router      (last; routes to upstream)      │
+  └─────────────────────────────────────────────────────────────────────┘
+       │
+       ↓ ext_authz fires:
+  ┌─ ext_authz filter ──────────────────────────────────────────────────┐
+  │  Sends a gRPC CheckRequest to credential-authz with:                │
+  │    - the request's headers, method, path, host                      │
+  │    - source identity (mTLS principal)                               │
+  │  Awaits CheckResponse:                                              │
+  │    - If status=OK: continue, optionally apply header overrides      │
+  │    - If status=DENIED: short-circuit with the specified HTTP error  │
+  └─────────────────────────────────────────────────────────────────────┘
+       │
+       ↓ (assuming OK + x-api-key injection)
+  Continue down the filter chain → router → upstream cluster
+  (DestinationRule kicks in here for TLS origination)
+       │
+       ↓
+  TLS to api.anthropic.com:443
+
+Two configPatches in this resource:
+
+1. Add a CLUSTER for credential-authz so Envoy knows how to reach it.
+   Uses STRICT_DNS resolution (resolve credential-authz.agent-platform.svc.cluster.local
+   on every connection); HTTP/2 (gRPC needs it).
+
+2. Insert the ext_authz HTTP filter into the outbound listener's filter
+   chain, configured to call the cluster from #1.
+
+workloadSelector targets pods with the `app.kubernetes.io/component=agent-task`
+label. The smoke-test pod and the credential-flow test pod (Step 3 verification)
+will need this label to participate in the credential flow.
+
+failure_mode_allow=false: if credential-authz is unreachable or returns an
+error, the request is REJECTED. Failing closed is correct here — we don't
+want a degraded credential-authz to result in unauthenticated requests
+reaching Anthropic.
+
+Cluster naming: we reference Istio's AUTO-GENERATED cluster name, not a
+custom one. The format is:
+  outbound|<port>||<service>.<namespace>.svc.cluster.local
+
+Why we use the auto-generated cluster instead of adding our own:
+  - mTLS to upstream is configured automatically (Istio's transport_socket
+    points at istiod's SDS for cert provisioning)
+  - HTTP/2 is enabled because the credential-authz Service's port is named
+    `grpc-authz` (the `grpc-` prefix triggers Istio's protocol auto-detection)
+  - DNS / endpoint resolution happens via Istio's normal CDS/EDS
+
+Adding a custom cluster (the previous approach) skipped Istio's transport_
+socket config and tried plaintext to a STRICT-mTLS namespace — which gets
+rejected silently and produces UAEX (ext_authz failure) from the caller's
+side. Don't do that.
+*/}}
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: anthropic-credential-injection
+  namespace: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  workloadSelector:
+    labels:
+      app.kubernetes.io/component: agent-task
+  configPatches:
+    # Insert the ext_authz filter into the outbound HTTP filter chain.
+    # Istio's auto-generated cluster handles mTLS + HTTP/2 (the latter
+    # because credential-authz's Service port is named grpc-authz).
+    - applyTo: HTTP_FILTER
+      match:
+        context: SIDECAR_OUTBOUND
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ext_authz
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+            transport_api_version: V3
+            grpc_service:
+              envoy_grpc:
+                cluster_name: outbound|{{ .Values.credentialAuthz.port }}||credential-authz.{{ .Values.platformNamespace.name }}.svc.cluster.local
+                # CRITICAL: must set `authority` explicitly when the cluster
+                # name contains pipe characters (Istio's auto-generated
+                # cluster naming format). Without this, Envoy uses the bare
+                # cluster_name as the HTTP/2 `:authority` pseudo-header,
+                # which credential-authz's sidecar rejects as invalid HTTP/2
+                # (pipes aren't valid in :authority per RFC 7540), closing
+                # the connection. Symptom: rq_error count rises, but no
+                # RBAC stats fire on credential-authz side; istio-proxy
+                # debug log shows "Invalid HTTP header field was received".
+                authority: credential-authz.{{ .Values.platformNamespace.name }}.svc.cluster.local
+              timeout: 2s
+            failure_mode_allow: false
+            # Body is NOT forwarded to credential-authz: with_request_body is
+            # OMITTED entirely. (Setting max_request_bytes: 0 fails Envoy's
+            # proto validation in 1.24+; the default-no-body behavior is what
+            # we want anyway — credential-authz only inspects headers.)
+{{- end -}}

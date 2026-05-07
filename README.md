@@ -41,13 +41,26 @@ make build-credential-authz-image
 # 3. Re-deploy the chart so it uses the just-built image
 make app-upgrade
 
-# 4. Create the Anthropic Secret separately (chart never sees the key)
-kubectl create secret generic anthropic-api-key \
-  --namespace=agent-system \
-  --from-literal=api-key="${ANTHROPIC_API_KEY:-sk-ant-stub-step-02-do-not-use}"
+# 4. Create the Anthropic Secret separately (chart never sees the key).
+#    IMPORTANT: pipe through `tr -d '\n\r'` to strip any trailing newline a
+#    pasted key might carry. Keys with embedded newlines fail Anthropic's
+#    validation — symptom is 401 "invalid x-api-key" with an otherwise valid
+#    key. The chart's `--from-file=/dev/stdin` form also avoids exposing the
+#    key in argv (visible via `ps`).
+printf '%s' "${ANTHROPIC_API_KEY:-sk-ant-stub-step-02-do-not-use}" \
+  | tr -d '\n\r' \
+  | kubectl create secret generic anthropic-api-key \
+      --namespace=agent-platform \
+      --from-file=api-key=/dev/stdin \
+      --dry-run=client -o yaml \
+  | kubectl apply -f -
 
-# 5. Verify end-to-end: file watcher picks up Secret, gRPC contract returns x-api-key, rotation works without restart
+# 5a. Verify the gRPC contract: credential-authz returns x-api-key on ext_authz Check
 make test-credential-authz
+
+# 5b. Verify the FULL credential flow: agent-tasks pod calls Anthropic via Istio,
+#     ext_authz injects key, request reaches Anthropic. Returns 200 with a real key.
+make test-credential-flow
 
 # Tear down
 make cluster-down
@@ -84,7 +97,22 @@ When triggered, GitHub server-side rejects pushes containing recognized secret p
 1. Console → Settings → Workspaces → create `dev-k8s-debug-agents`
 2. Workspace → Limits → set monthly cap (e.g. **$50** for dev) + email alerts at 25/50/75%
 3. API Keys → create dev-only key, scope to that workspace, save in a password manager
-4. Rotation runbook: revoke → create new → `kubectl create secret … --dry-run=client -o yaml | kubectl apply -f -` → file watcher picks up the new key without pod restart
+4. Rotation runbook: revoke → generate new → push to K8s with newline stripped:
+
+   ```bash
+   # If you stash the key in macOS Keychain (recommended for dev — never enters shell history):
+   security add-generic-password -a "$USER" -s "anthropic-api-key" -U  # paste at hidden prompt
+
+   security find-generic-password -a "$USER" -s "anthropic-api-key" -w \
+     | tr -d '\n\r' \
+     | kubectl create secret generic anthropic-api-key \
+         --namespace=agent-platform \
+         --from-file=api-key=/dev/stdin \
+         --dry-run=client -o yaml \
+     | kubectl apply -f -
+   ```
+
+   `tr -d '\n\r'` is **important** — pasted API keys often carry a trailing newline that breaks Anthropic's validation (symptom: 401 "invalid x-api-key" with an otherwise valid key). credential-authz's fsnotify file watcher picks up the rotation in seconds; no pod restart needed.
 
 ## Install flow (dev and prod, same pattern)
 

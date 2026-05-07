@@ -16,11 +16,16 @@ SHELL := /usr/bin/env bash
 CLUSTER_NAME       ?= debug-agent
 K8S_VERSION        ?= v1.33.1
 ISTIO_VERSION      ?= 1.24.2
-AGENT_NAMESPACE    ?= agent-system
+
+# Namespace topology — see design_namespace_topology.md
+PLATFORM_NAMESPACE ?= agent-platform
+TASKS_NAMESPACE    ?= agent-tasks
 ISTIO_NAMESPACE    ?= istio-system
+
 CHART_DIR          ?= charts/k8s-debug-agents
 KIND_CONFIG        ?= evals/kind-config.yaml
 SMOKE_POD          ?= evals/smoke-test/pod.yaml
+CREDFLOW_DIR       ?= evals/credential-flow
 ISTIO_REPO_URL     := https://istio-release.storage.googleapis.com/charts
 
 # Image config — local Kind dev. Empty REGISTRY means images are loaded via
@@ -47,7 +52,8 @@ help: ## Show this help
 	@echo "  CLUSTER_NAME=$(CLUSTER_NAME)"
 	@echo "  K8S_VERSION=$(K8S_VERSION)"
 	@echo "  ISTIO_VERSION=$(ISTIO_VERSION)"
-	@echo "  AGENT_NAMESPACE=$(AGENT_NAMESPACE)"
+	@echo "  PLATFORM_NAMESPACE=$(PLATFORM_NAMESPACE)"
+	@echo "  TASKS_NAMESPACE=$(TASKS_NAMESPACE)"
 	@echo "  ISTIO_NAMESPACE=$(ISTIO_NAMESPACE)"
 
 # ─── Kind dev loop ─────────────────────────────────────────────────────────────
@@ -61,10 +67,10 @@ cluster-down: ## Delete the Kind cluster
 
 .PHONY: smoke-test
 smoke-test: ## Re-run the sidecar-injection smoke test against the current cluster
-	@echo ">> Running smoke test: deploy pod to $(AGENT_NAMESPACE), verify 2 containers (app + istio-proxy)"
+	@echo ">> Running smoke test: deploy pod to $(TASKS_NAMESPACE), verify 2 containers (app + istio-proxy)"
 	kubectl apply -f $(SMOKE_POD)
-	kubectl wait --for=condition=Ready pod/smoke-test -n $(AGENT_NAMESPACE) --timeout=60s
-	@CONTAINERS=$$(kubectl get pod smoke-test -n $(AGENT_NAMESPACE) -o jsonpath='{.spec.containers[*].name}'); \
+	kubectl wait --for=condition=Ready pod/smoke-test -n $(TASKS_NAMESPACE) --timeout=60s
+	@CONTAINERS=$$(kubectl get pod smoke-test -n $(TASKS_NAMESPACE) -o jsonpath='{.spec.containers[*].name}'); \
 	COUNT=$$(echo "$$CONTAINERS" | wc -w | tr -d ' '); \
 	if [[ "$$COUNT" != "2" ]]; then \
 	  echo "FAIL: expected 2 containers, got $$COUNT: $$CONTAINERS"; exit 1; \
@@ -155,9 +161,10 @@ VALUES_FILE ?= $(CHART_DIR)/values-kind.yaml
 .PHONY: app-install
 app-install: ## Install k8s-debug-agents chart — override VALUES_FILE for prod
 	@echo ">> Installing k8s-debug-agents (values: $(VALUES_FILE))"
+	@echo ">> Helm release lives in $(PLATFORM_NAMESPACE); chart also creates $(TASKS_NAMESPACE) for runtime workloads"
 	helm upgrade --install k8s-debug-agents $(CHART_DIR) \
 	  -f $(VALUES_FILE) \
-	  --namespace $(AGENT_NAMESPACE) --create-namespace \
+	  --namespace $(PLATFORM_NAMESPACE) --create-namespace \
 	  --wait
 
 .PHONY: app-upgrade
@@ -165,14 +172,14 @@ app-upgrade: ## Upgrade k8s-debug-agents chart — override VALUES_FILE for prod
 	@echo ">> Upgrading k8s-debug-agents (values: $(VALUES_FILE))"
 	helm upgrade k8s-debug-agents $(CHART_DIR) \
 	  -f $(VALUES_FILE) \
-	  --namespace $(AGENT_NAMESPACE) \
+	  --namespace $(PLATFORM_NAMESPACE) \
 	  --wait
 
 .PHONY: app-uninstall
 app-uninstall: ## Uninstall k8s-debug-agents chart
-	-helm uninstall k8s-debug-agents --namespace $(AGENT_NAMESPACE)
-	@echo ">> Namespace $(AGENT_NAMESPACE) intentionally NOT deleted — would remove any unrelated workloads."
-	@echo ">>       To remove: kubectl delete namespace $(AGENT_NAMESPACE)"
+	-helm uninstall k8s-debug-agents --namespace $(PLATFORM_NAMESPACE)
+	@echo ">> Namespaces $(PLATFORM_NAMESPACE) and $(TASKS_NAMESPACE) intentionally NOT deleted."
+	@echo ">>       To remove: kubectl delete namespace $(PLATFORM_NAMESPACE) $(TASKS_NAMESPACE)"
 
 # ─── Image build (Kind dev loop) ───────────────────────────────────────────────
 
@@ -192,8 +199,12 @@ build-credential-authz-image: ## Build credential-authz image and kind-load into
 # ─── Step 2 verification ───────────────────────────────────────────────────────
 
 .PHONY: test-credential-authz
-test-credential-authz: ## End-to-end verify: create test secret, hit ext_authz, assert x-api-key in response
+test-credential-authz: ## Direct gRPC test: hit credential-authz ext_authz endpoint, assert x-api-key in response
 	@./evals/credential-authz/check.sh
+
+.PHONY: test-credential-flow
+test-credential-flow: ## End-to-end Step 3: a pod in agent-tasks calls Anthropic via Istio + ext_authz; verify the header was injected
+	@./evals/credential-flow/check.sh
 
 # ─── Security guardrails ───────────────────────────────────────────────────────
 # Layer 2 of accidental-secret-checkin defense (Layer 1 = .gitignore patterns,

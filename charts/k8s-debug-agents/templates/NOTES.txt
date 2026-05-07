@@ -2,19 +2,49 @@ k8s-debug-agents installed.
 
 Chart version : {{ .Chart.Version }}
 App version   : {{ .Chart.AppVersion }}
-Namespace     : {{ .Values.namespace.name }}
-Istio inject  : {{ .Values.namespace.istioInjection }}
 
-Current components enabled:
-  node-agent        : {{ .Values.nodeAgent.enabled }}
-  credential-authz  : {{ .Values.credentialAuthz.enabled }}
-  dispatcher        : {{ .Values.dispatcher.enabled }}
+Namespaces (created by this chart):
+  Platform        : {{ .Values.platformNamespace.name }}   (long-running infra: credential-authz, dispatcher, token-tracker)
+  Tasks           : {{ .Values.tasksNamespace.name }}      (ephemeral agent-task Job pods)
 
-In Step 1, no components are enabled — only the namespace is created.
-Verify sidecar injection works:
+Istio injection : platform={{ .Values.platformNamespace.istioInjection }} tasks={{ .Values.tasksNamespace.istioInjection }}
+PSA enforce     : platform={{ .Values.platformNamespace.podSecurity.enforce }} tasks={{ .Values.tasksNamespace.podSecurity.enforce }}
 
+Components enabled:
+  credential-authz : {{ .Values.credentialAuthz.enabled }}      (in {{ .Values.platformNamespace.name }})
+  dispatcher       : {{ .Values.dispatcher.enabled }}      (in {{ .Values.platformNamespace.name }}; planned Step 4)
+  node-agent       : {{ .Values.nodeAgent.enabled }}      (in agent-node-system; planned Step 6)
+
+Create / rotate the Anthropic API Secret. ALWAYS strip trailing whitespace —
+clipboard-pasted keys often carry a trailing newline that breaks Anthropic's
+validation:
+
+  # If the key is in your shell env:
+  printf '%s' "$ANTHROPIC_API_KEY" \
+    | tr -d '\n\r' \
+    | kubectl create secret generic anthropic-api-key \
+        -n {{ .Values.platformNamespace.name }} \
+        --from-file=api-key=/dev/stdin \
+        --dry-run=client -o yaml \
+    | kubectl apply -f -
+
+  # Or if the key is in macOS Keychain:
+  security find-generic-password -a "$USER" -s "anthropic-api-key" -w \
+    | tr -d '\n\r' \
+    | kubectl create secret generic anthropic-api-key \
+        -n {{ .Values.platformNamespace.name }} \
+        --from-file=api-key=/dev/stdin \
+        --dry-run=client -o yaml \
+    | kubectl apply -f -
+
+credential-authz's fsnotify loader picks up the rotation within a few seconds
+of kubelet's projected-Secret sync (~60s worst case). No pod restart needed.
+
+Then run the end-to-end verification (Step 3):
+  make test-credential-flow
+  # Expect: HTTP_STATUS=200 (real key) or HTTP_STATUS=401 (key invalid)
+
+Verify Istio sidecar injection in the tasks namespace:
   kubectl apply -f evals/smoke-test/pod.yaml
-  kubectl get pod smoke-test -n {{ .Values.namespace.name }} -o jsonpath='{.spec.containers[*].name}{"\n"}'
-  # Expect: smoke-test istio-proxy  (two names)
-
-Or: make smoke-test
+  kubectl get pod smoke-test -n {{ .Values.tasksNamespace.name }} -o jsonpath='{.spec.containers[*].name}{"\n"}'
+  # Expect: smoke-test istio-proxy  (with init container istio-validation, since istio-cni)

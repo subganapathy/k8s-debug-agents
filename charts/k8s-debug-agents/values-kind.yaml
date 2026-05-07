@@ -4,12 +4,11 @@
 # Purpose:
 # - Smaller resource requests so 4-node Kind cluster fits on a laptop
 # - Verbose-friendly settings where useful
-# - Same `namespace.istioInjection: true` as prod (we want dev and prod to use
-#   the mesh path identically)
-
-namespace:
-  name: agent-system
-  istioInjection: true
+# - Same namespace structure + Istio injection + PSA restricted as prod
+#   (we want dev and prod to use the mesh + security path identically)
+#
+# Namespace structure inherits defaults from values.yaml (agent-platform,
+# agent-tasks). Override here only if the names need to differ in dev.
 
 images:
   # Empty registry means `kind load docker-image` loads the images directly.

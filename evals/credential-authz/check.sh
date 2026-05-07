@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-NAMESPACE="${AGENT_NAMESPACE:-agent-system}"
+NAMESPACE="${PLATFORM_NAMESPACE:-agent-platform}"
 SECRET_NAME="${SECRET_NAME:-anthropic-api-key}"
 STUB_KEY="${STUB_KEY:-sk-ant-stub-step-02-do-not-use}"
 ROTATED_KEY="${ROTATED_KEY:-sk-ant-stub-step-02-rotated}"

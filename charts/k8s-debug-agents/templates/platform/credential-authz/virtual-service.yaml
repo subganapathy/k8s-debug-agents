@@ -1,0 +1,43 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+VirtualService: rewrite port 80 → port 443 for api.anthropic.com.
+
+Why this is necessary (a subtlety of Istio's egress with TLS origination):
+
+The application sends HTTP to api.anthropic.com:80 so Envoy can L7-inspect
+the request. But Anthropic's actual service is on port 443 (HTTPS). The
+DestinationRule originates TLS — but TLS origination configures HOW the
+sidecar talks to the upstream, not WHICH port the sidecar talks to.
+
+When the route handler picks a cluster, it picks based on (host, port).
+Port 80 traffic to api.anthropic.com → cluster outbound|80||api.anthropic.com.
+But the only cluster Istio creates is outbound|443||api.anthropic.com (because
+the upstream is on 443). Without rewriting, the lookup fails and the request
+hits a black hole — connection refused.
+
+This VirtualService rewrites the destination port from 80 → 443 BEFORE the
+cluster lookup. Result: traffic on port 80 finds outbound|443||api.anthropic.com,
+which has the DestinationRule applied → TLS origination → outbound HTTPS.
+
+This is the canonical modern Istio TLS-origination-for-egress pattern, per:
+  https://istio.io/latest/docs/tasks/traffic-management/egress/egress-tls-origination/
+*/}}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: anthropic-api-port-rewrite
+  namespace: {{ .Values.tasksNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - api.anthropic.com
+  http:
+    - match:
+        - port: 80
+      route:
+        - destination:
+            host: api.anthropic.com
+            port:
+              number: 443
+{{- end -}}
