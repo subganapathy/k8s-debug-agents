@@ -45,6 +45,9 @@ help: ## Show this help
 	@echo "Generic (any cluster):"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(istio-|app-)' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Scenario evals (Step 4):"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^scenario-' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 	@echo "Security guardrails:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(install-pre-commit|security-scan):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -205,6 +208,59 @@ test-credential-authz: ## Direct gRPC test: hit credential-authz ext_authz endpo
 .PHONY: test-credential-flow
 test-credential-flow: ## End-to-end Step 3: a pod in agent-tasks calls Anthropic via Istio + ext_authz; verify the header was injected
 	@./evals/credential-flow/check.sh
+
+# ─── Scenario evals (Step 4) ───────────────────────────────────────────────────
+# Each scenario is a deterministic broken-pod fixture in evals/scenarios/pod-launch/.
+# The fixture YAML creates a dedicated PSA-restricted namespace (eval-<SCENARIO>)
+# and a pod that reaches a known stuck state. The paired .expected.yaml file
+# specifies the structural assertions a correct agent diagnosis must satisfy.
+#
+# This is the input to Step 4's eyeball-first → model-as-judge eval loop.
+# The agent + harness land in subsequent PRs; this PR ships only the fixtures.
+
+SCENARIO_DIR := evals/scenarios/pod-launch
+
+.PHONY: scenario-apply
+scenario-apply: ## Apply a scenario fixture. Usage: make scenario-apply SCENARIO=insufficient-cpu
+	@test -n "$(SCENARIO)" || { echo "ERROR: SCENARIO=<name> required (e.g. SCENARIO=insufficient-cpu)"; exit 1; }
+	@test -f $(SCENARIO_DIR)/$(SCENARIO).yaml || { echo "ERROR: $(SCENARIO_DIR)/$(SCENARIO).yaml not found"; exit 1; }
+	@echo ">> Applying scenario fixture: $(SCENARIO)"
+	kubectl apply -f $(SCENARIO_DIR)/$(SCENARIO).yaml
+	@echo ">> Waiting up to 60s for pod to reach stuck state in namespace eval-$(SCENARIO)..."
+	@for i in $$(seq 1 30); do \
+	  PHASE=$$(kubectl get pods -n eval-$(SCENARIO) -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true); \
+	  EVENT_COUNT=$$(kubectl get events -n eval-$(SCENARIO) --field-selector reason=FailedScheduling 2>/dev/null | wc -l | tr -d ' '); \
+	  if [[ "$$PHASE" == "Pending" && "$$EVENT_COUNT" -gt "1" ]]; then \
+	    echo ">> Reached stuck state: phase=Pending with FailedScheduling events"; \
+	    break; \
+	  fi; \
+	  if [[ "$$PHASE" == "Running" ]]; then \
+	    echo "WARN: pod is Running — fixture did not reproduce intended stuck state"; \
+	    break; \
+	  fi; \
+	  sleep 2; \
+	done
+	@echo ""
+	@echo ">> Pod state:"
+	@kubectl get pods -n eval-$(SCENARIO) -o wide
+	@echo ""
+	@echo ">> Recent events:"
+	@kubectl get events -n eval-$(SCENARIO) --sort-by='.lastTimestamp' | tail -10
+	@echo ""
+	@echo ">> Expected output spec: $(SCENARIO_DIR)/$(SCENARIO).expected.yaml"
+	@echo ">> To clean up: make scenario-clean SCENARIO=$(SCENARIO)"
+
+.PHONY: scenario-clean
+scenario-clean: ## Clean up a scenario fixture. Usage: make scenario-clean SCENARIO=insufficient-cpu
+	@test -n "$(SCENARIO)" || { echo "ERROR: SCENARIO=<name> required"; exit 1; }
+	@echo ">> Deleting namespace eval-$(SCENARIO) and all its resources"
+	-kubectl delete namespace eval-$(SCENARIO) --wait=false
+	@echo ">> Done (namespace deletion is async; resources will GC shortly)"
+
+.PHONY: scenario-list
+scenario-list: ## List available scenario fixtures
+	@echo "Available scenarios in $(SCENARIO_DIR):"
+	@ls -1 $(SCENARIO_DIR)/*.yaml 2>/dev/null | grep -v '.expected.yaml' | sed 's|$(SCENARIO_DIR)/||; s|\.yaml$$||; s|^|  |'
 
 # ─── Security guardrails ───────────────────────────────────────────────────────
 # Layer 2 of accidental-secret-checkin defense (Layer 1 = .gitignore patterns,
