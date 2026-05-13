@@ -1,0 +1,88 @@
+# evals/scenarios/pod-launch/insufficient-cpu.expected.yaml
+#
+# Structural spec for the expected agent output on the `insufficient-cpu` scenario.
+#
+# This is NOT a full text match. The LLM's output will vary across runs (different
+# phrasing, different ordering, different remediation specifics). The spec asserts
+# only the load-bearing PROPERTIES of a correct diagnosis:
+#   - Output kind (catches catastrophic agent failure)
+#   - Confidence threshold (the agent shouldn't be unsure of this easy case)
+#   - Concept mention via any_of lists (uses synonym sets; resilient to phrasing)
+#   - Forbidden mentions (catches wrong-diagnosis where agent latches onto a
+#     non-existent failure mode like "image pull" or "network")
+#
+# This file is also the contract that the model-as-judge grader (Step 4e) will
+# be calibrated against. Eyeball-graded outputs in Step 4d either satisfy this
+# spec or don't, and where they don't, we look at why.
+
+target:
+  scenarioName: insufficient-cpu
+  namespace: eval-insufficient-cpu
+  podName: needs-massive-cpu
+
+expected:
+  # The agent must produce structured Findings. Any other kind (Error, malformed,
+  # missing) is a catastrophic failure and the scenario fails immediately.
+  outputKind: Findings
+
+  # This scenario's signal is loud and the diagnostic tree is shallow. A correctly
+  # working agent should not be "low" confidence on this one.
+  confidenceAtLeast: medium
+
+  # The problem statement must mention at least ONE of these concepts. The any_of
+  # set is intentionally broad — the model might say "CPU request exceeds node
+  # allocatable" OR "scheduling failed due to insufficient resources" OR
+  # "FailedScheduling because no node has enough CPU" — all correct.
+  problemMustMention:
+    anyOf:
+      - cpu
+      - scheduling
+      - schedulable
+      - insufficient
+      - allocatable
+      - FailedScheduling
+
+  # And the problem must NOT latch onto a wrong diagnosis. If the agent thinks
+  # this is an image pull / network / config issue, it's a serious miss — these
+  # words shouldn't appear in the root cause statement.
+  problemMustNotMention:
+    - image pull
+    - imagepullbackoff
+    - imagepullsecret
+    - networkpolicy
+    - cni
+    - dns
+    - configmap
+    - secret
+    - readiness probe
+    - liveness probe
+
+  # The top remediation must reference the actual fix: reducing CPU request
+  # or scaling the node pool.
+  remediationsMustInclude:
+    anyOf:
+      - reduce
+      - lower
+      - decrease
+      - scale
+      - larger node
+      - bigger node
+      - more capacity
+      - smaller request
+
+  # The agent should also surface improvement categories (preventive guidance).
+  # For this scenario, the right categories are pod-spec hygiene (right-sizing
+  # resource requests) and scheduling-aware practices.
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pod_spec
+      - resource_management
+      - scheduling
+      - rightsizing
+
+  # `alsoCheck` should at minimum suggest verifying related possibilities
+  # (e.g., recent resource-request changes, autoscaler config, node pool size).
+  alsoCheckMustInclude:
+    # Soft constraint — populated but content-flexible. Any non-empty alsoCheck
+    # array satisfies this for now; we'll tighten as we see actual outputs.
+    nonEmpty: true
