@@ -1,0 +1,89 @@
+# evals/scenarios/pod-launch/pdb-rolling-update-deadlock.expected.yaml
+#
+# The agent's diagnosis must trace the deadlock chain end-to-end:
+#   1. A pod is Pending with FailedScheduling / Insufficient cpu.
+#   2. The cluster is full of pods from the SAME Deployment (the
+#      workload is filling its own capacity, not competing with a
+#      different workload).
+#   3. The PDB at minAvailable=3 with currentHealthy=2 has
+#      disruptionsAllowed=0 — no recovery via eviction.
+#
+# A weak Findings says: "Reduce CPU request, or add a node."
+# A strong Findings says: "PDB minAvailable=3 equals the desired replica
+# count, leaving zero eviction budget. Even after adding capacity, the
+# next rolling update will deadlock the same way. Fix the PDB shape
+# (minAvailable=2 or use maxUnavailable=1) so rolling updates have
+# disruption headroom."
+
+# We pass the Deployment name as podName. The agent's `kubectl_read
+# kind=Pod` returns 404 (no pod named "app" — the ReplicaSet's pods have
+# random suffixes), and the agent must traverse from the controller to
+# the actual stuck pod. Same pattern as quota-exceeded.
+target:
+  scenarioName: pdb-rolling-update-deadlock
+  namespace: eval-pdb-rolling-update-deadlock
+  podName: app
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # The problem statement must name the PDB as the structural blocker.
+  # Mentioning Insufficient cpu / capacity is fine ALONGSIDE the PDB —
+  # the chain has both layers. The PDB is the binding constraint.
+  problemMustMention:
+    anyOf:
+      - PodDisruptionBudget
+      - PDB
+      - app-pdb
+      - eviction
+      - minAvailable
+      - currentHealthy
+      - disruptionsAllowed
+      - deadlock
+
+  problemMustNotMention:
+    # If the agent only blames image pull / network / readiness, it
+    # missed the actual issue.
+    - image pull
+    - imagepullbackoff
+    - imagepullsecret
+    - networkpolicy
+    - readiness probe
+    - liveness probe
+    - configmap not found
+
+  # Remediations should reference structural fixes — most importantly,
+  # weakening the PDB so future rolling updates aren't blocked. Capacity
+  # / CPU reduction is acceptable as a secondary remediation.
+  remediationsMustInclude:
+    anyOf:
+      - PodDisruptionBudget
+      - PDB
+      - minAvailable
+      - maxUnavailable
+      - weaken
+      - relax
+      - reduce minAvailable
+      - lower minAvailable
+      - scale down
+      - reduce replicas
+      - add capacity
+      - add nodes
+      - reduce CPU
+      - reduce request
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pdb_policy
+      - pdb_configuration
+      - capacity_planning
+      - resource_planning
+      - workload_isolation
+      - scheduling
+      - rollout_strategy
+      - pod_spec
+      - admission_control
+
+  alsoCheckMustInclude:
+    nonEmpty: true

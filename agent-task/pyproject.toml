@@ -1,0 +1,41 @@
+# Python project metadata for the agent-task family.
+#
+# This pyproject.toml installs ALL agent-task variants (currently only
+# pod_launch_task; future variants — intra_cluster_traffic_task,
+# hpa_latency_task, etc. — will land as sibling packages under src/).
+# One shared image, multiple variant packages, runtime selection via
+# the VARIANT env var per ARCHITECTURE.md §11.
+#
+# Modern Python: src-layout, pyproject.toml-only (no setup.py, no setup.cfg).
+# We use pip + venv (universal); could move to uv later for speed.
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-task"
+version = "0.1.0"
+description = "Agent-task family — diagnostic agents that produce structured Findings. Currently ships pod_launch_task; more variants planned."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    # K8s Python client — auto-discovers credentials in BOTH dev (kubeconfig)
+    # and pod-runtime (projected SA token at /var/run/secrets/...) contexts.
+    # Replaces subprocess+kubectl so this code runs identically on a laptop
+    # or inside a restricted K8s pod with only apiserver egress allowed.
+    "kubernetes>=29.0.0",
+    # Pydantic — typed Findings + Metrics + AgentResult models. Single source
+    # of truth for the agent's output contract; powers tool input_schema
+    # generation, CRD schema generation (Step 4.5), and the eval verifier
+    # (PR-9). Already a transitive dep via anthropic/kubernetes but pinned
+    # explicitly because we import it directly.
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+# One CLI per variant. Add a new line here when adding a new variant.
+pod-launch-task = "pod_launch_task.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

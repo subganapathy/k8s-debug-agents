@@ -1,0 +1,67 @@
+# evals/scenarios/pod-launch/quota-exceeded.expected.yaml
+#
+# Expected agent behavior on the quota-exceeded scenario.
+#
+# Critical aspect: no Pod with the queried name exists. The agent's
+# kubectl_get_pod must return NotFound. The agent then has to:
+#   1. Recognize the ADMISSION-REJECTED phase (pod doesn't exist)
+#   2. Use kubectl_get_events_for_object with kind=Deployment or
+#      kind=ReplicaSet to find the FailedCreate event
+#   3. Fetch the ResourceQuota via kubectl_get_resource to confirm the
+#      numbers and ground the remediation
+#
+# If the agent emits a Findings without ever looking at controller events,
+# something is wrong with either the system prompt or the tool surface.
+
+target:
+  scenarioName: quota-exceeded
+  namespace: eval-quota-exceeded
+  # User invokes against the Deployment name; the agent's bootstrap will
+  # 404 on this because no Pod exists with this name. The phase-aware
+  # playbook should pivot to ADMISSION-REJECTED investigation.
+  podName: needs-room
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  problemMustMention:
+    anyOf:
+      - quota
+      - ResourceQuota
+      - exceeded
+      - admission
+      - tight-quota
+      - FailedCreate
+
+  problemMustNotMention:
+    # Wrong diagnoses for this case:
+    - insufficient cpu                # scheduler didn't say this (no pod to schedule)
+    - failedscheduling                # no scheduling failure; admission rejection is upstream
+    - image pull                      # no image-related failure
+    - imagepullbackoff
+    - crashloopbackoff
+    - readiness probe
+
+  remediationsMustInclude:
+    anyOf:
+      - increase quota
+      - raise quota
+      - bump quota
+      - update quota
+      - reduce request
+      - lower request
+      - reduce cpu
+      - reduce replicas
+      - scale down
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - resource_quotas
+      - admission_control
+      - capacity_planning
+      - quota_management
+      - pod_spec
+
+  alsoCheckMustInclude:
+    nonEmpty: true

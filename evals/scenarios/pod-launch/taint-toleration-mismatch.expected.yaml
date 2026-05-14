@@ -1,0 +1,68 @@
+# evals/scenarios/pod-launch/taint-toleration-mismatch.expected.yaml
+#
+# A strong Findings traces both layers of the diagnostic chain:
+#   1. The pod's nodeSelector pins it to debug-agent-worker3 (and only worker3).
+#   2. worker3 has a NoSchedule taint (reserved=topology-test) and the pod
+#      has no matching toleration.
+# Together → permanently unschedulable.
+#
+# A weak Findings says: "Pod can't schedule. Try a different node selector."
+# A strong Findings says: "Pod nodeSelector targets debug-agent-worker3, which
+# has taint reserved=topology-test:NoSchedule. Pod has no matching toleration.
+# Add `tolerations: [{key: reserved, operator: Equal, value: topology-test,
+# effect: NoSchedule}]` OR remove the nodeSelector to let it run on worker1/2."
+
+target:
+  scenarioName: taint-toleration-mismatch
+  namespace: eval-taint-toleration-mismatch
+  podName: needs-worker3
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  problemMustMention:
+    anyOf:
+      - taint
+      - toleration
+      - reserved
+      - topology-test
+      - NoSchedule
+      - nodeSelector
+
+  problemMustNotMention:
+    - image pull
+    - imagepullbackoff
+    - imagepullsecret
+    - networkpolicy
+    - readiness probe
+    - liveness probe
+    - PodDisruptionBudget
+    - ResourceQuota
+    - LimitRange
+    - configmap not found
+
+  # Remediation must reference at least one of: adding the toleration,
+  # changing/removing the nodeSelector, or removing the taint.
+  remediationsMustInclude:
+    anyOf:
+      - toleration
+      - tolerate
+      - reserved
+      - topology-test
+      - nodeSelector
+      - remove the taint
+      - untaint
+      - taint
+      - change the selector
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - scheduling
+      - pod_spec
+      - node_pool
+      - workload_isolation
+      - admission_control
+
+  alsoCheckMustInclude:
+    nonEmpty: true

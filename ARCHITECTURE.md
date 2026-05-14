@@ -360,11 +360,23 @@ status:                                       # ↓ written by TASK via /status 
     # Findings may include "I could not determine X because Y."
     # This is NOT a special output kind — it's just honest findings.
     # Orchestrator's LLM reads it and decides what tool to call next.
-  metrics:
-    tokensUsed: 5012
-    wallTimeSeconds: 18
+  metrics:                                    # open-shape map; observability-friendly
+    model: claude-sonnet-4-6
+    turns_used: 2
+    wall_clock_seconds: 12.34
+    input_tokens: 1250                        # non-cached input
+    output_tokens: 1835
+    cache_creation_input_tokens: 1100         # first turn writes the cache (~1.25× input cost)
+    cache_read_input_tokens: 6400             # subsequent turns read it (~0.10× input cost)
+    cost_usd: 0.038                           # computed from tokens × model price
+    tool_calls_summary:                       # which tools the task LLM called, how many times
+      kubectl_get_events_for_pod: 1
+    termination: null                         # populated only on degenerate paths
+                                              # (api_retries_exhausted, max_turns_exhausted, ...)
   errorReason: null                           # populated when phase=Failed
 ```
+
+The `metrics` field is intentionally an **open-shape map** (no strict schema). Tasks can add observability fields without coordinating CRD changes. The fields above are what the Phase 1 agent emits; future variants may add e.g. `prompt_cache_hit_rate`, `model_thinking_tokens`, `streaming_chunks`, etc.
 
 **One output kind only** (`findings`). No `NeedsEscalation`, no `Error` discriminator. The task either runs to completion and writes `phase=Complete` with `findings`, or it crashes (Job goes to `Failed` and task writes `phase=Failed` if it can, OR Job ends without a status update and orchestrator detects "Job failed + status still Dispatched/Running"). The orchestrator handles task failures as `is_error: true` tool_result content fed to the orchestrator LLM.
 

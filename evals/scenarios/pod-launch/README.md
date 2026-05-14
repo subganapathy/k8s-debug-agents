@@ -25,11 +25,14 @@ The `anyOf` lists are synonym sets. Resilient to LLM phrasing variance; still ca
 | Scenario | What it tests | Output kind | Implemented? |
 |---|---|---|---|
 | `insufficient-cpu` | Pod stuck Pending with `FailedScheduling`; CPU request > all node allocatable | Findings | ✅ |
+| `quota-exceeded` | ResourceQuota blocks pod creation at admission layer; ReplicaSet emits `FailedCreate`; no pods exist | Findings | ✅ |
+| `pdb-blocks-scaling` | PDB-protected pods consume all worker capacity; another pod can't fit; PDB prevents eviction | Findings | ✅ |
+| `pdb-rolling-update-deadlock` | Deployment 3 replicas + PDB minAvailable=3; only 2 fit → 1 stuck Pending; PDB shape leaves zero eviction budget so rolling updates / scale-ups deadlock | Findings | ✅ |
+| `taint-toleration-mismatch` | Pod pinned to a tainted node via `nodeSelector` but lacks a matching toleration; tests taint/toleration + nodeSelector diagnostic chain | Findings | ✅ |
 | `image-pull-secret-missing` | Pod stuck ContainerCreating; namespace lacks `imagePullSecrets` for private registry | Findings | _planned_ |
 | `init-crashloop` | Init container exits non-zero; main containers blocked | Findings | _planned_ |
 | `readiness-probe-timeout` | Main container running but `Ready=false` because probe endpoint slow | Findings | _planned_ |
 | `pull-image-slow` | Image pull genuinely in progress (network slow); K8s API insufficient to conclude | Findings (low-confidence, "K8s API exhausted, runtime evidence needed") | _planned_ |
-| `pdb-blocks-eviction` (stretch) | Replacement pod can't schedule because PDB blocks evicting incumbent | Findings | _planned_ |
 | `oom-killed-loop` (stretch) | Container killed by kernel OOM in restart loop | Findings | _planned_ |
 
 ## How to apply / clean up a scenario
