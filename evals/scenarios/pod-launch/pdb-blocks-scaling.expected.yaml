@@ -1,0 +1,77 @@
+# evals/scenarios/pod-launch/pdb-blocks-scaling.expected.yaml
+#
+# Critical: the agent must NOT stop at "Insufficient cpu" — that's the
+# surface symptom. The real root cause is the PDB-protected hog
+# Deployment consuming all capacity with no eviction headroom.
+#
+# A weak Findings says: "Reduce another-app's CPU request to ≤3."
+# A strong Findings says: "another-app is Pending because both workers
+# are full of `hog` Deployment pods, which are protected by `hog-pdb`
+# at minAvailable=2=currentHealthy (no eviction allowed). To unblock,
+# either: (a) weaken the PDB, (b) scale the hog Deployment down, or
+# (c) add cluster capacity. Reducing another-app's request alone may
+# not be enough if the hogs grow."
+#
+# The agent demonstrates good diagnostic reasoning by tracing the chain.
+
+target:
+  scenarioName: pdb-blocks-scaling
+  namespace: eval-pdb-blocks-scaling
+  podName: another-app
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # Problem statement must trace the chain. We require mention of:
+  # - the PDB (the actual structural cause), AND
+  # - the resource pressure (the surface symptom).
+  problemMustMention:
+    anyOf:
+      - PodDisruptionBudget
+      - PDB
+      - hog-pdb
+      - eviction
+      - minAvailable
+      - currentHealthy
+      - protected
+
+  problemMustNotMention:
+    # If the agent only blames image pull / network / readiness, it
+    # missed the actual issue.
+    - image pull
+    - imagepullbackoff
+    - imagepullsecret
+    - networkpolicy
+    - readiness probe
+    - liveness probe
+    - configmap not found
+
+  # Remediations should reference structural fixes, not just CPU
+  # reduction (which is the easy-but-incomplete answer).
+  remediationsMustInclude:
+    anyOf:
+      - PodDisruptionBudget
+      - PDB
+      - minAvailable
+      - weaken
+      - scale down
+      - scale the hog
+      - reduce replicas
+      - add capacity
+      - add nodes
+      - reduce another-app
+      - reduce CPU
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - resource_planning
+      - capacity_planning
+      - pdb_policy
+      - workload_isolation
+      - scheduling
+      - pod_spec
+      - admission_control
+
+  alsoCheckMustInclude:
+    nonEmpty: true

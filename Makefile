@@ -48,6 +48,9 @@ help: ## Show this help
 	@echo "Scenario evals (Step 4):"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^scenario-' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Agent (Step 4):"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^agent-' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 	@echo "Security guardrails:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(install-pre-commit|security-scan):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -261,6 +264,37 @@ scenario-clean: ## Clean up a scenario fixture. Usage: make scenario-clean SCENA
 scenario-list: ## List available scenario fixtures
 	@echo "Available scenarios in $(SCENARIO_DIR):"
 	@ls -1 $(SCENARIO_DIR)/*.yaml 2>/dev/null | grep -v '.expected.yaml' | sed 's|$(SCENARIO_DIR)/||; s|\.yaml$$||; s|^|  |'
+
+# ─── Agent (Step 4) ────────────────────────────────────────────────────────────
+# Standalone agent runner. Requires ANTHROPIC_API_KEY in env and an active
+# kubectl context. See agent-task/README.md for setup details.
+
+AGENT_DIR := agent-task
+
+.PHONY: agent-setup
+agent-setup: ## Create venv and install agent-task in editable mode (one-time setup)
+	@echo ">> Creating venv at $(AGENT_DIR)/.venv"
+	cd $(AGENT_DIR) && python3 -m venv .venv
+	@echo ">> Installing agent-task in editable mode"
+	cd $(AGENT_DIR) && .venv/bin/pip install -e .
+	@echo ""
+	@echo "Setup complete. To run the agent, you must export ANTHROPIC_API_KEY first."
+	@echo "If your key is in macOS Keychain:"
+	@echo "  export ANTHROPIC_API_KEY=\$$(security find-generic-password -a \"\$$USER\" -s \"anthropic-api-key\" -w | tr -d '\\n\\r')"
+
+.PHONY: agent-run
+agent-run: ## Run the pod-launch agent. Usage: make agent-run NAMESPACE=foo POD=bar
+	@test -n "$(NAMESPACE)" || { echo "ERROR: NAMESPACE=<ns> required"; exit 1; }
+	@test -n "$(POD)" || { echo "ERROR: POD=<pod_name> required"; exit 1; }
+	@test -n "$$ANTHROPIC_API_KEY" || { \
+	  echo "ERROR: ANTHROPIC_API_KEY not set. See agent-task/README.md for setup."; \
+	  exit 2; \
+	}
+	@test -d $(AGENT_DIR)/.venv || { \
+	  echo "ERROR: venv not found at $(AGENT_DIR)/.venv. Run 'make agent-setup' first."; \
+	  exit 1; \
+	}
+	@cd $(AGENT_DIR) && .venv/bin/python -m pod_launch_task --namespace $(NAMESPACE) --pod $(POD)
 
 # ─── Security guardrails ───────────────────────────────────────────────────────
 # Layer 2 of accidental-secret-checkin defense (Layer 1 = .gitignore patterns,
