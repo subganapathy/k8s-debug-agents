@@ -1,0 +1,88 @@
+# evals/scenarios/pod-launch/image-pull-not-found.yaml
+#
+# Scenario: container image tag does not exist in the registry. Pod gets
+# stuck in ImagePullBackOff after kubelet exhausts its initial pull
+# retries.
+#
+# Setup:
+# - A single-container pod referencing `busybox:nonexistent-tag-9999-test`.
+#   The `busybox` repository exists on Docker Hub, but this tag does not.
+# - imagePullPolicy defaults to IfNotPresent for tagged images, but since
+#   nothing matching the tag is cached locally, kubelet must attempt the
+#   pull. Registry returns "manifest not found" → ErrImagePull, then
+#   kubelet enters the standard exponential backoff → ImagePullBackOff.
+# - No imagePullSecrets are needed (busybox repo is public — the issue
+#   is the tag, not auth — keeps the diagnostic clean).
+#
+# Surface symptom: pod phase=Pending, container in waiting state with
+# reason=ImagePullBackOff (or briefly ErrImagePull on the first attempt).
+# Events: kubelet emits "Failed" with message "manifest for
+# busybox:nonexistent-tag-9999-test not found".
+#
+# What the agent should diagnose: RUNTIME-CREATION phase image-pull
+# failure. The pod has been scheduled (PodScheduled=True) but kubelet
+# can't pull the image. Root cause is the bad tag, not auth or network.
+#
+# Findings expectations:
+# - problem statement names ImagePullBackOff OR image pull failure, AND
+#   ideally the specific tag (`nonexistent-tag-9999-test`) OR phrase
+#   "manifest not found".
+# - remediations propose fixing the image reference: correct the tag,
+#   verify the image exists in the registry, or use a different image.
+# - improvements include CI validation (kubectl --dry-run, image pull
+#   tests in CI before deploy, image-pinning by digest, etc.).
+#
+# Does NOT exercise the log-triage sub-agent — no container has started,
+# no logs exist. Tool surface used should be:
+#   - kubectl_list with kind=Event involved_object_kind=Pod
+#     (kubelet's Failed/Pulling events)
+#   - Not kubectl_get_container_logs (no logs to get).
+# This is the cost-discipline test: agent should NOT speculatively
+# fetch logs for an image-pull failure (fat-tool discipline section
+# of the system prompt says this explicitly).
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eval-image-pull-not-found
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    eval-scenario: image-pull-not-found
+    eval-purpose: pod-launch-image-pull-failure-fixture
+    app.kubernetes.io/managed-by: k8s-debug-agents-evals
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bad-image-pod
+  namespace: eval-image-pull-not-found
+  labels:
+    eval-scenario: image-pull-not-found
+spec:
+  containers:
+    - name: app
+      # Tag deliberately chosen to NOT exist in the busybox repo.
+      # Public repo, so no auth failures cloud the diagnosis — this
+      # tests the "bad tag" failure mode specifically.
+      image: busybox:nonexistent-tag-9999-test
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
+        limits:
+          cpu: "50m"
+          memory: "32Mi"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+  restartPolicy: Never

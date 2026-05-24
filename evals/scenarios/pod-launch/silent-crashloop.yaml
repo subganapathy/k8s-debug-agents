@@ -1,0 +1,89 @@
+# evals/scenarios/pod-launch/silent-crashloop.yaml
+#
+# Scenario: container exits non-zero but produces ZERO log output.
+# Triggers definition-of-done clause (b): "K8s API exhausted, runtime
+# evidence needed." Tests the escalation path — the agent's formal way
+# of saying "I tried my K8s-API tools and the answer isn't there;
+# delegate to a runtime specialist."
+#
+# Setup:
+# - A single-container pod whose command is `exit 1` (no echo, no
+#   stdout, no stderr). The container produces NO log output before
+#   exiting.
+# - restartPolicy=OnFailure → CrashLoopBackOff after a few cycles.
+#
+# What the parent agent sees:
+# - containerStatuses[0].state.waiting.reason=CrashLoopBackOff
+# - containerStatuses[0].lastState.terminated.exitCode=1
+# - containerStatuses[0].lastState.terminated.reason="Error"
+# - containerStatuses[0].lastState.terminated.message=null (or empty)
+# - kubectl_get_container_logs with previous=true returns "(no log output)"
+#   — the sub-agent's bypass threshold means raw is returned, but the raw
+#   is empty.
+#
+# What the agent should diagnose:
+# - POST-START-FAILURE phase, container exits 1
+# - Logs are empty — no K8s-API-visible signal for WHY
+# - Reach clause (b): emit Findings with confidence=low
+# - problem statement explicitly names what runtime-level evidence
+#   would be needed (e.g., "kernel signal that killed the process",
+#   "runc/CRI-level error", "stderr buffer the kernel may have
+#   captured before the exit")
+# - alsoCheck populated with concrete runtime-inspection items
+#
+# This is the *delegation proof point*: agent demonstrably escalates
+# when K8s-API tools are insufficient, instead of fabricating a
+# diagnosis or guessing.
+#
+# Note: agent's `tool_calls_summary` should show that it DID try
+# kubectl_get_container_logs (with previous=true) — proving it
+# attempted the K8s-API path before escalating. The sub_agent_calls
+# should be EMPTY because the log output is below the 2 KiB threshold
+# (it's literally empty), so the log-triage Haiku sub-agent is
+# bypassed.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eval-silent-crashloop
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    eval-scenario: silent-crashloop
+    eval-purpose: pod-launch-escalation-proof-point
+    app.kubernetes.io/managed-by: k8s-debug-agents-evals
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: silent-app
+  namespace: eval-silent-crashloop
+  labels:
+    eval-scenario: silent-crashloop
+spec:
+  restartPolicy: OnFailure
+  containers:
+    - name: app
+      image: busybox:1.36
+      # Deliberately produces no output before exiting non-zero.
+      # No echo, no logging — kubectl logs returns "(no log output)".
+      # This is the canonical "K8s can't tell you why" case.
+      command: ["sh", "-c", "exit 1"]
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
+        limits:
+          cpu: "50m"
+          memory: "32Mi"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault

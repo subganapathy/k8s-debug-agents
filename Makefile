@@ -229,20 +229,32 @@ scenario-apply: ## Apply a scenario fixture. Usage: make scenario-apply SCENARIO
 	@test -f $(SCENARIO_DIR)/$(SCENARIO).yaml || { echo "ERROR: $(SCENARIO_DIR)/$(SCENARIO).yaml not found"; exit 1; }
 	@echo ">> Applying scenario fixture: $(SCENARIO)"
 	kubectl apply -f $(SCENARIO_DIR)/$(SCENARIO).yaml
-	@echo ">> Waiting up to 60s for pod to reach stuck state in namespace eval-$(SCENARIO)..."
-	@for i in $$(seq 1 30); do \
+	@echo ">> Waiting up to 120s for pod to reach stuck state in namespace eval-$(SCENARIO)..."
+	@for i in $$(seq 1 60); do \
 	  PHASE=$$(kubectl get pods -n eval-$(SCENARIO) -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true); \
 	  EVENT_COUNT=$$(kubectl get events -n eval-$(SCENARIO) --field-selector reason=FailedScheduling 2>/dev/null | wc -l | tr -d ' '); \
+	  RESTART_COUNT=$$(kubectl get pods -n eval-$(SCENARIO) -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0); \
+	  WAITING_REASON=$$(kubectl get pods -n eval-$(SCENARIO) -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || true); \
 	  if [[ "$$PHASE" == "Pending" && "$$EVENT_COUNT" -gt "1" ]]; then \
 	    echo ">> Reached stuck state: phase=Pending with FailedScheduling events"; \
 	    break; \
 	  fi; \
-	  if [[ "$$PHASE" == "Running" ]]; then \
-	    echo "WARN: pod is Running — fixture did not reproduce intended stuck state"; \
+	  if [[ "$$WAITING_REASON" == "CrashLoopBackOff" ]] || [[ "$$RESTART_COUNT" -ge "1" ]]; then \
+	    echo ">> Reached stuck state: container crashloop (restartCount=$$RESTART_COUNT waiting.reason=$$WAITING_REASON)"; \
+	    break; \
+	  fi; \
+	  if [[ "$$WAITING_REASON" == "ImagePullBackOff" || "$$WAITING_REASON" == "ErrImagePull" ]]; then \
+	    echo ">> Reached stuck state: image pull failure (waiting.reason=$$WAITING_REASON)"; \
+	    break; \
+	  fi; \
+	  READY_STATUS=$$(kubectl get pods -n eval-$(SCENARIO) -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true); \
+	  if [[ "$$READY_STATUS" == "True" ]]; then \
+	    echo ">> Reached settled state: pod is Ready (latency-lens scenarios may legitimately end here)"; \
 	    break; \
 	  fi; \
 	  sleep 2; \
-	done
+	done; \
+	[[ $$i -ge 60 ]] && echo "WARN: timeout reached without entering a known stuck state (PHASE=$$PHASE RESTART=$$RESTART_COUNT WAITING=$$WAITING_REASON) — continuing anyway" || true
 	@echo ""
 	@echo ">> Pod state:"
 	@kubectl get pods -n eval-$(SCENARIO) -o wide
@@ -256,9 +268,9 @@ scenario-apply: ## Apply a scenario fixture. Usage: make scenario-apply SCENARIO
 .PHONY: scenario-clean
 scenario-clean: ## Clean up a scenario fixture. Usage: make scenario-clean SCENARIO=insufficient-cpu
 	@test -n "$(SCENARIO)" || { echo "ERROR: SCENARIO=<name> required"; exit 1; }
-	@echo ">> Deleting namespace eval-$(SCENARIO) and all its resources"
-	-kubectl delete namespace eval-$(SCENARIO) --wait=false
-	@echo ">> Done (namespace deletion is async; resources will GC shortly)"
+	@echo ">> Deleting namespace eval-$(SCENARIO) and all its resources (synchronous)"
+	-kubectl delete namespace eval-$(SCENARIO) --wait=true
+	@echo ">> Done (namespace deletion complete)"
 
 .PHONY: scenario-list
 scenario-list: ## List available scenario fixtures
