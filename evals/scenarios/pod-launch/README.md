@@ -29,6 +29,10 @@ The `anyOf` lists are synonym sets. Resilient to LLM phrasing variance; still ca
 | `pdb-blocks-scaling` | PDB-protected pods consume all worker capacity; another pod can't fit; PDB prevents eviction | Findings | ✅ |
 | `pdb-rolling-update-deadlock` | Deployment 3 replicas + PDB minAvailable=3; only 2 fit → 1 stuck Pending; PDB shape leaves zero eviction budget so rolling updates / scale-ups deadlock | Findings | ✅ |
 | `taint-toleration-mismatch` | Pod pinned to a tainted node via `nodeSelector` but lacks a matching toleration; tests taint/toleration + nodeSelector diagnostic chain | Findings | ✅ |
+| `crashloop-missing-env` | Container exits with FATAL because required env var (`DB_URL`) is missing; pod enters CrashLoopBackOff. Logs are ~3.5 KiB so this exercises the log-triage Haiku sub-agent path. | Findings | ✅ |
+| `image-pull-not-found` | Pod references an image tag that doesn't exist in the registry; kubelet fails with `ErrImagePull` → `ImagePullBackOff`. Tests RUNTIME-CREATION phase + fat-tool discipline (agent must NOT speculatively fetch logs — no container has started). | Findings | ✅ |
+| `silent-crashloop` | Container exits non-zero (`sh -c "exit 1"`) with zero log output. Tests POST-START-FAILURE diagnosis when logs are empty — agent must read the cause from `spec.command` rather than fabricate. *(True opaque-failure / escalation testing requires richer fixtures and is deferred — see scenario's `.expected.yaml` comments.)* | Findings | ✅ |
+| `slow-readiness-probe` | Pod becomes Ready eventually but takes ~45s due to a high `readinessProbe.initialDelaySeconds`. Tests the **latency lens proof point**: bootstrap derives per-phase timing, the agent identifies the slow phase and the probe-spec cause. | Findings | ✅ |
 | `image-pull-secret-missing` | Pod stuck ContainerCreating; namespace lacks `imagePullSecrets` for private registry | Findings | _planned_ |
 | `init-crashloop` | Init container exits non-zero; main containers blocked | Findings | _planned_ |
 | `readiness-probe-timeout` | Main container running but `Ready=false` because probe endpoint slow | Findings | _planned_ |

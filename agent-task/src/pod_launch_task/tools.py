@@ -57,6 +57,10 @@ from kubernetes.dynamic.exceptions import (
 )
 
 from pod_launch_task.findings import Findings
+from pod_launch_task.log_triage import (
+    SMALL_LOG_THRESHOLD,
+    triage_logs_with_fallback,
+)
 
 # ─── Supported kinds + apiVersion map ──────────────────────────────────────────
 
@@ -237,9 +241,21 @@ KUBECTL_GET_LOGS_TOOL = {
         "Set `previous=true` to fetch logs from the PREVIOUS instance of "
         "the container (essential for crashloop analysis — the current "
         "instance may not have started yet). For INIT phase issues, pass "
-        "the init container's name. Returns the last `lines` log lines "
-        "(default 200). Empty output means the container produced no logs "
-        "in that period (or doesn't exist; the API will say so)."
+        "the init container's name.\n\n"
+        "RETURN SHAPE (size-dependent):\n"
+        " - If the raw log output is < 2 KiB, returns it directly.\n"
+        " - If ≥ 2 KiB, the tool internally invokes a log-triage Haiku "
+        "sub-agent and returns a JSON-serialized LogAnalysis "
+        "(signature, key_lines, evidence_excerpt, suspected_cause, "
+        "confidence) instead of raw bytes. This keeps your context "
+        "bounded regardless of log size. You read the structured summary "
+        "the same way you'd reason over raw logs — same diagnostic "
+        "questions answered.\n\n"
+        "FAT-TOOL DISCIPLINE: this tool may invoke a sub-agent "
+        "(~$0.02, ~5 seconds latency per call). Use when you have a "
+        "concrete hypothesis a container's logs would confirm. DON'T "
+        "fetch logs for pods stuck SCHEDULING (no container has run yet) "
+        "or stuck in ADMISSION-REJECTED phases (the pod never existed)."
     ),
     "input_schema": {
         "type": "object",
@@ -260,6 +276,18 @@ KUBECTL_GET_LOGS_TOOL = {
                 "type": "boolean",
                 "default": False,
                 "description": "Fetch logs from the PREVIOUS instance of the container (use for CrashLoopBackOff to see what caused the last crash).",
+            },
+            "hypothesis_hint": {
+                "type": "string",
+                "description": (
+                    "Optional. Steers the log-triage sub-agent (only used "
+                    "when the log output ≥ 2 KiB). Pass a short phrase "
+                    "describing what you're looking for, e.g., 'missing "
+                    "env var', 'OOM signals', 'retry storm'. Improves "
+                    "the sub-agent's focus when you have a working "
+                    "hypothesis. Ignored if logs are small enough to "
+                    "return raw."
+                ),
             },
         },
     },
@@ -474,26 +502,35 @@ def _selector_matches(selector: dict[str, Any], labels: dict[str, str]) -> bool:
 # ─── Tool execution ────────────────────────────────────────────────────────────
 
 
-def execute_tool(name: str, args: dict[str, Any]) -> str:
-    """Execute a tool by name and return the result as a string.
+def execute_tool(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Execute a tool by name and return (result_content, metrics_delta).
 
     Returns:
-        The tool's output as a JSON string, or an error message formatted as a
-        string. The agent surfaces this back to the LLM as the tool_result
-        content. Even errors are formatted as strings — we want the LLM to be
-        able to reason about a NotFound or PermissionDenied just like a normal
-        response.
+        A tuple of (content, metrics_delta):
+
+        - `content`: the tool's output as a string — either JSON, a raw
+          log dump, or an error message. The agent surfaces this back to
+          the LLM as the tool_result content. Errors are formatted as
+          strings so the LLM can reason about NotFound / PermissionDenied
+          / etc. like a normal response.
+        - `metrics_delta`: a dict the parent agent loop merges into its
+          Metrics. Most tools return ({}, content) — only sub-agent-backed
+          tools (currently kubectl_get_container_logs) report non-empty
+          deltas with `sub_agent_calls` and `sub_agent_cost_usd`.
     """
     if name == "kubectl_read":
-        return _exec_read(args)
+        return (_exec_read(args), {})
     elif name == "kubectl_list":
-        return _exec_list(args)
+        return (_exec_list(args), {})
     elif name == "kubectl_get_container_logs":
-        return _exec_logs(args)
+        return _exec_logs(args)  # already returns a tuple
     elif name == "emit_findings":
-        return "emit_findings is handled by the agent loop and should not be executed as a regular tool"
+        return (
+            "emit_findings is handled by the agent loop and should not be executed as a regular tool",
+            {},
+        )
     else:
-        return f"unknown tool: {name}"
+        return (f"unknown tool: {name}", {})
 
 
 def _exec_read(args: dict[str, Any]) -> str:
@@ -673,7 +710,20 @@ def _list_pdbs(args: dict[str, Any], namespace: str) -> str:
     )
 
 
-def _exec_logs(args: dict[str, Any]) -> str:
+def _exec_logs(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Fetch container logs; route through the log-triage sub-agent when large.
+
+    Returns (content, metrics_delta).
+      - For raw logs < SMALL_LOG_THRESHOLD (2 KiB), returns the raw bytes
+        and an empty metrics_delta.
+      - For larger logs, invokes `triage_logs_with_fallback` which either:
+        (a) returns a JSON-serialized `LogAnalysis` + non-empty metrics
+            (sub_agent_calls / sub_agent_cost_usd), or
+        (b) on sub-agent failure, returns truncated raw logs with a
+            degradation note + empty metrics.
+      - For empty logs or API errors, returns the error string and an
+        empty metrics_delta.
+    """
     try:
         logs = _core_v1.read_namespaced_pod_log(
             name=args["pod"],
@@ -683,34 +733,152 @@ def _exec_logs(args: dict[str, Any]) -> str:
             previous=args.get("previous", False),
             _request_timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        if not logs:
-            return "(no log output)"
-        return logs
     except ApiException as e:
-        return f"K8s API error reading logs: status={e.status} reason={e.reason}"
+        return (f"K8s API error reading logs: status={e.status} reason={e.reason}", {})
     except Exception as e:
-        return f"K8s API error reading logs: {type(e).__name__}: {e}"
+        return (f"K8s API error reading logs: {type(e).__name__}: {e}", {})
+
+    if not logs:
+        return ("(no log output)", {})
+
+    # Below threshold: parent agent sees raw bytes — cheaper and the
+    # short output is already context-budget-friendly.
+    if len(logs) < SMALL_LOG_THRESHOLD:
+        return (logs, {})
+
+    # Above threshold: invoke the log-triage Haiku sub-agent. The
+    # fallback wrapper guarantees we always return a string content even
+    # if the sub-agent fails (auth/timeout/malformed-output) — the parent
+    # agent never sees an exception.
+    return triage_logs_with_fallback(
+        raw_logs=logs,
+        hypothesis_hint=args.get("hypothesis_hint"),
+    )
 
 
 # ─── Bootstrap (deterministic pre-flight before the LLM loop starts) ──────────
 
 
 def bootstrap_pod_context(namespace: str, pod_name: str) -> dict[str, Any]:
-    """Fetch initial pod state for inclusion in the first user message.
+    """Fetch initial pod state + derived launch timing for the first user message.
 
     See ARCHITECTURE.md §15 (Decision: Bootstrap-in-task). This is the
     deterministic phase before the LLM loop starts — we want the agent to
     have ground truth context from turn 1, not spend its first turn calling
     kubectl_read.
 
-    Returns:
-        A dict with the filtered pod JSON and a fetched-at ISO timestamp.
+    Returns a dict with three fields:
+      - pod_state_filtered: the filtered pod JSON (str). Same content the
+        agent would get from `kubectl_read kind=Pod` — annotations /
+        managedFields / deep ownerRefs stripped.
+      - launch_timing: a dict of per-phase durations derived from
+        `status.conditions[].lastTransitionTime`, OR None if the pod has
+        no relevant conditions yet (e.g., just created) or the pod fetch
+        returned an error string. Drives the latency-lens diagnostic
+        for slow-but-eventually-Ready pods.
+      - fetched_at_iso: when this bootstrap ran.
     """
-    pod_text = execute_tool(
+    # execute_tool returns (content_str, metrics_delta_dict). For the
+    # bootstrap we discard metrics_delta — sub-agents never fire from
+    # kubectl_read; this is purely a context-fetch.
+    pod_text, _ = execute_tool(
         "kubectl_read",
         {"kind": "Pod", "namespace": namespace, "name": pod_name},
     )
+
+    launch_timing: dict[str, Any] | None = None
+    try:
+        pod_dict = json.loads(pod_text)
+        launch_timing = _compute_launch_timing(pod_dict)
+    except (json.JSONDecodeError, TypeError):
+        # pod_text was an error message (e.g., 404 NotFound) not JSON —
+        # skip timing.
+        pass
+
     return {
         "pod_state_filtered": pod_text,
+        "launch_timing": launch_timing,
         "fetched_at_iso": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _compute_launch_timing(pod_dict: dict[str, Any]) -> dict[str, Any] | None:
+    """Derive per-phase launch durations from pod.status.conditions.
+
+    Computes deltas between K8s lifecycle transitions:
+      - creation_to_scheduled = PodScheduled.lastTransitionTime − creationTimestamp
+      - scheduled_to_initialized = Initialized.lastTransitionTime − PodScheduled.lastTransitionTime
+      - initialized_to_containers_ready = ContainersReady.lastTransitionTime − Initialized.lastTransitionTime
+      - containers_ready_to_ready = Ready.lastTransitionTime − ContainersReady.lastTransitionTime
+      - total_time_to_ready = Ready.lastTransitionTime − creationTimestamp
+
+    Returns None if creationTimestamp is missing OR no conditions are
+    present. Returns a dict with only the deltas it could compute — any
+    transitions missing from `conditions[]` (e.g., a pod still Pending
+    has no Ready condition) are omitted, not set to null.
+
+    All durations are seconds (float, rounded to 2 dp). The agent uses
+    these to recognize slow-launch culprits via the latency lens.
+    """
+    metadata = pod_dict.get("metadata") or {}
+    status = pod_dict.get("status") or {}
+    conditions = status.get("conditions") or []
+
+    creation_iso = metadata.get("creationTimestamp")
+    if not creation_iso or not conditions:
+        return None
+
+    def parse_iso(s: str | None) -> datetime | None:
+        if not s:
+            return None
+        try:
+            # K8s timestamps end in "Z" for UTC. Python's fromisoformat
+            # handles "+00:00" but not "Z" until 3.11+; replace to be safe.
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    creation = parse_iso(creation_iso)
+    if creation is None:
+        return None
+
+    # Build a map of condition type → lastTransitionTime (parsed).
+    by_type: dict[str, datetime] = {}
+    for c in conditions:
+        ctype = c.get("type")
+        cstatus = c.get("status")
+        if not ctype or cstatus != "True":
+            # Only include conditions that have transitioned to True —
+            # a Ready=False condition doesn't represent "Ready was reached".
+            continue
+        ts = parse_iso(c.get("lastTransitionTime"))
+        if ts is not None:
+            by_type[ctype] = ts
+
+    def secs_between(a: datetime | None, b: datetime | None) -> float | None:
+        if a is None or b is None:
+            return None
+        return round((b - a).total_seconds(), 2)
+
+    scheduled = by_type.get("PodScheduled")
+    initialized = by_type.get("Initialized")
+    containers_ready = by_type.get("ContainersReady")
+    ready = by_type.get("Ready")
+
+    deltas: dict[str, Any] = {}
+    if scheduled is not None:
+        deltas["creation_to_scheduled"] = secs_between(creation, scheduled)
+    if scheduled is not None and initialized is not None:
+        deltas["scheduled_to_initialized"] = secs_between(scheduled, initialized)
+    if initialized is not None and containers_ready is not None:
+        deltas["initialized_to_containers_ready"] = secs_between(
+            initialized, containers_ready
+        )
+    if containers_ready is not None and ready is not None:
+        deltas["containers_ready_to_ready"] = secs_between(containers_ready, ready)
+    if ready is not None:
+        deltas["total_time_to_ready"] = secs_between(creation, ready)
+
+    if not deltas:
+        return None
+    return deltas

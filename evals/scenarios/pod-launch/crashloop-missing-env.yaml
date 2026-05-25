@@ -1,0 +1,109 @@
+# evals/scenarios/pod-launch/crashloop-missing-env.yaml
+#
+# Scenario: container crashes at startup because a required environment
+# variable is missing, enters CrashLoopBackOff. Exercises the log-triage
+# Haiku sub-agent (PR-9b) — the container logs are large enough (>2 KiB)
+# to trigger sub-agent invocation instead of returning raw bytes.
+#
+# Setup:
+# - A single-container pod that runs a shell script:
+#   1. Logs startup banner + 20 DEBUG lines looking for DB_URL
+#   2. Logs the FATAL line saying DB_URL is required but not set
+#   3. Logs a fake panic + stack trace
+#   4. Exits 1
+# - restartPolicy=OnFailure causes kubelet to retry. After 2-3 fast
+#   crashes, the pod enters CrashLoopBackOff (waiting.reason).
+#
+# Total log output per crash: ~40 lines, ~2.5 KiB — comfortably above
+# the SMALL_LOG_THRESHOLD (2 KiB) so the parent agent's
+# kubectl_get_container_logs call triggers the Haiku sub-agent.
+#
+# Surface symptom: container in CrashLoopBackOff.
+# Actual root cause: missing DB_URL env var (visible in the logs).
+#
+# What the agent should diagnose:
+# - Recognize POST-START-FAILURE phase (CrashLoopBackOff in
+#   containerStatuses[0].state.waiting.reason).
+# - Fetch logs via kubectl_get_container_logs (likely with previous=true
+#   since the current instance may be in backoff). The tool internally
+#   invokes the sub-agent; agent receives a structured LogAnalysis JSON
+#   instead of raw bytes.
+# - From LogAnalysis: signature=missing_config or panic, key_lines
+#   include the FATAL DB_URL line + stack frames, suspected_cause names
+#   DB_URL as the missing required env var.
+# - Final Findings: problem statement names DB_URL + missing env;
+#   remediations propose setting the env var via envFrom referencing a
+#   ConfigMap/Secret, or directly via env: [{name: DB_URL, value: ...}].
+# - Metrics: tool_calls_summary shows kubectl_get_container_logs=1
+#   (possibly 2 if agent fetched both current + previous);
+#   sub_agent_calls shows {"log_triage": 1} (or 2);
+#   sub_agent_cost_usd > 0.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eval-crashloop-missing-env
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    eval-scenario: crashloop-missing-env
+    eval-purpose: pod-launch-crashloop-with-log-triage-fixture
+    app.kubernetes.io/managed-by: k8s-debug-agents-evals
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: panicking-app
+  namespace: eval-crashloop-missing-env
+  labels:
+    eval-scenario: crashloop-missing-env
+spec:
+  # OnFailure means kubelet retries on exit code != 0, so the pod will
+  # crash → restart → crash → restart → CrashLoopBackOff after 2-3
+  # cycles. This is the canonical state the diagnostic agent sees.
+  restartPolicy: OnFailure
+  containers:
+    - name: app
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[INFO] Starting service v1.2.3 (pid=$$)"
+          echo "[INFO] Configuration loader: scanning environment for required keys"
+          for v in DB_URL DB_USERNAME DB_PASSWORD REDIS_HOST REDIS_PORT \
+                   KAFKA_BROKERS S3_BUCKET S3_REGION SENTRY_DSN OTEL_ENDPOINT \
+                   LOG_LEVEL HTTP_PORT GRPC_PORT METRICS_PORT FEATURE_FLAGS \
+                   API_KEY JWT_SECRET TLS_CERT_PATH TLS_KEY_PATH CACHE_TTL_SECONDS; do
+            echo "[DEBUG] env probe: looking for $v"
+            echo "[DEBUG]   ... not set in container environment"
+          done
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            echo "[DEBUG] config check attempt $i: looking for DB_URL (timeout 100ms)"
+          done
+          echo "[ERROR] FATAL: DB_URL environment variable is required but not set"
+          echo "[ERROR] panic: cannot establish database connection without DB_URL"
+          echo "[ERROR] goroutine 1 [running]:"
+          echo "[ERROR]   at main.connectDB (main.go:42)"
+          echo "[ERROR]   at main.loadConfig (main.go:27)"
+          echo "[ERROR]   at main.main (main.go:18)"
+          echo "[ERROR] exit status 1"
+          exit 1
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "32Mi"
+        limits:
+          cpu: "50m"
+          memory: "32Mi"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault

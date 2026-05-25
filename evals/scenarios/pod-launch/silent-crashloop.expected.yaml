@@ -1,0 +1,80 @@
+# evals/scenarios/pod-launch/silent-crashloop.expected.yaml
+#
+# This scenario tests POST-START-FAILURE phase when LOGS ARE EMPTY:
+# the container exits non-zero but produces zero log output. The
+# agent must:
+#   1. Recognize that fetching empty logs adds nothing (fat-tool
+#      discipline — don't burn the sub-agent on empty input), OR
+#      gracefully handle the "(no log output)" return.
+#   2. Read the bootstrapped pod spec — in busybox/Kind fixtures
+#      the command field literally shows `sh -c "exit 1"`, which
+#      IS the smoking gun.
+#   3. Emit confident Findings naming the spec-level cause.
+#
+# NOTE on the escalation proof point: I originally framed this as
+# the "agent escalates to runtime specialist" scenario. In practice
+# the agent diagnosed it at confidence=high using ONLY the
+# bootstrapped pod spec — which is correct behavior, not a failure.
+# When the K8s API contains the cause (even just via spec.command),
+# the agent should NOT escalate — escalation is for genuinely
+# opaque failures. A true escalation fixture requires an opaque
+# failure mode (custom image, runtime/CRI-level issue) that isn't
+# easily reproducible in Kind with busybox. Deferred to a future
+# PR when we have richer fixtures or node-agent integration.
+
+target:
+  scenarioName: silent-crashloop
+  namespace: eval-silent-crashloop
+  podName: silent-app
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # Must name the spec-level cause (the explicit exit / command).
+  problemMustMention:
+    anyOf:
+      - exit 1
+      - exit code 1
+      - exits with
+      - command
+      - CrashLoopBackOff
+      - exits immediately
+      - no useful work
+      - no log output
+      - empty logs
+
+  problemMustNotMention:
+    # If the agent fabricated any of these, it ignored the spec
+    # signal and guessed.
+    - image pull
+    - imagepullbackoff
+    - PodDisruptionBudget
+    - taint
+    - quota
+    - readiness probe
+    - nodeSelector
+    - OOMKilled
+
+  # Remediation must reference fixing the command / removing the
+  # sentinel exit / replacing with a real workload.
+  remediationsMustInclude:
+    anyOf:
+      - command
+      - exit
+      - replace
+      - real workload
+      - actual command
+      - fix the
+      - update the
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pod_spec
+      - testing
+      - validation
+      - ci_cd
+      - observability
+
+  alsoCheckMustInclude:
+    nonEmpty: true

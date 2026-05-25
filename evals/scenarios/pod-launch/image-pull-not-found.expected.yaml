@@ -1,0 +1,79 @@
+# evals/scenarios/pod-launch/image-pull-not-found.expected.yaml
+#
+# A strong Findings:
+#   - names ImagePullBackOff (or "image pull failed" / "manifest not
+#     found") in the problem statement
+#   - identifies the specific tag `nonexistent-tag-9999-test` from
+#     events
+#   - suggests fixing the tag, verifying the image exists, or pinning
+#     by digest
+#
+# A weak Findings would just say "the pod can't start" without
+# pinpointing the image-pull failure.
+#
+# Critical fat-tool-discipline assertion: the agent must NOT
+# speculatively fetch container logs for this scenario. No container
+# has started; there are no logs. The system prompt explicitly forbids
+# this. We verify by checking tool_calls_summary contains kubectl_list
+# but NOT kubectl_get_container_logs.
+
+target:
+  scenarioName: image-pull-not-found
+  namespace: eval-image-pull-not-found
+  podName: bad-image-pod
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # Problem statement must name the image-pull failure class.
+  problemMustMention:
+    anyOf:
+      - ImagePullBackOff
+      - ErrImagePull
+      - image pull
+      - manifest not found
+      - image
+      - pull
+      - tag
+      - registry
+
+  problemMustNotMention:
+    # If the agent named any of these, it ignored the actual signal.
+    - PodDisruptionBudget
+    - taint
+    - quota
+    - readiness probe
+    - nodeSelector
+    - insufficient cpu
+    - CrashLoopBackOff
+    - OOMKilled
+
+  # Remediations must reference fixing the image reference OR
+  # verifying the image exists.
+  remediationsMustInclude:
+    anyOf:
+      - tag
+      - image
+      - pull
+      - registry
+      - digest
+      - manifest
+      - correct
+      - verify
+      - check the
+      - fix the
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pod_spec
+      - image_optimization
+      - admission_control
+      - monitoring
+      - validation
+      - testing
+      - ci_cd
+      - image_registry
+
+  alsoCheckMustInclude:
+    nonEmpty: true

@@ -38,7 +38,7 @@ from typing import Any
 import anthropic
 from pydantic import ValidationError
 
-from pod_launch_task.findings import AgentResult, Findings, Metrics
+from pod_launch_task.findings import AgentResult, Findings, Metrics, ToolMetrics
 from pod_launch_task.prompts import SYSTEM_PROMPT
 from pod_launch_task.tools import TOOLS, bootstrap_pod_context, execute_tool
 
@@ -114,6 +114,19 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
         f"{boot['pod_state_filtered']}\n"
         f"</pod_state>"
     )
+    # When the pod has progressed far enough through its lifecycle for
+    # us to derive timing data from .status.conditions, include it as a
+    # separate trusted block. Drives the latency-lens reasoning for
+    # slow-but-eventually-Ready pods. trust='trusted' because the data
+    # is computed locally from K8s-API condition timestamps, not from
+    # any user-controllable field.
+    if boot.get("launch_timing"):
+        first_user_content += (
+            f"\n\nLaunch timing (seconds, derived from pod.status.conditions):\n"
+            f"<launch_timing from='derived' trust='trusted'>\n"
+            f"{json.dumps(boot['launch_timing'], indent=2)}\n"
+            f"</launch_timing>"
+        )
 
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": first_user_content}
@@ -126,7 +139,14 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
     total_output_tokens = 0
     total_cache_creation_tokens = 0
     total_cache_read_tokens = 0
-    tool_calls_summary: dict[str, int] = {}
+    # Per-tool aggregated metrics. Keyed by tool name. Each entry is a
+    # ToolMetrics holding call_count + sub_agent_calls + sub_agent_cost_usd.
+    # Empty when the agent invoked no tools (e.g., diagnosed entirely from
+    # bootstrap state). Sub-agent activity (currently log_triage from
+    # kubectl_get_container_logs) is attributed to its parent tool here,
+    # not surfaced as a separate top-level field — keeps each tool's
+    # footprint self-contained.
+    tool_metrics: dict[str, ToolMetrics] = {}
 
     for turn in range(1, MAX_TURNS + 1):
         if verbose:
@@ -168,7 +188,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 total_output_tokens=total_output_tokens,
                 total_cache_creation_tokens=total_cache_creation_tokens,
                 total_cache_read_tokens=total_cache_read_tokens,
-                tool_calls_summary=tool_calls_summary,
+                tool_metrics=tool_metrics,
                 termination=f"api_error_{type(e).__name__}",
             )
         except (
@@ -188,7 +208,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 total_output_tokens=total_output_tokens,
                 total_cache_creation_tokens=total_cache_creation_tokens,
                 total_cache_read_tokens=total_cache_read_tokens,
-                tool_calls_summary=tool_calls_summary,
+                tool_metrics=tool_metrics,
                 termination=f"api_retries_exhausted_{type(e).__name__}",
             )
 
@@ -249,7 +269,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                             total_output_tokens=total_output_tokens,
                             total_cache_creation_tokens=total_cache_creation_tokens,
                             total_cache_read_tokens=total_cache_read_tokens,
-                            tool_calls_summary=tool_calls_summary,
+                            tool_metrics=tool_metrics,
                             termination="emit_findings_validation_error",
                         )
                     return AgentResult(
@@ -262,20 +282,35 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                             output_tokens=total_output_tokens,
                             cache_creation_input_tokens=total_cache_creation_tokens,
                             cache_read_input_tokens=total_cache_read_tokens,
-                            tool_calls_summary=tool_calls_summary,
+                            tool_metrics=tool_metrics,
                         ),
                     )
 
-                # Real tool calls (anything other than emit_findings) get
-                # counted in the tool_calls_summary metric.
-                tool_calls_summary[block.name] = tool_calls_summary.get(block.name, 0) + 1
+                # Real tool calls (anything other than emit_findings) update
+                # this tool's ToolMetrics entry. Each tool's call_count +
+                # sub-agent rollup is attributed to its own bucket so the
+                # final Metrics carries per-tool footprints.
+                tm = tool_metrics.setdefault(block.name, ToolMetrics())
+                tm.call_count += 1
 
                 # Otherwise execute the tool and capture its result.
                 if verbose:
                     print(f"[turn {turn}] tool call: {block.name}({json.dumps(dict(block.input))})", file=sys.stderr)
-                result = execute_tool(block.name, dict(block.input))
+                # execute_tool returns (content, metrics_delta). metrics_delta
+                # is empty for most tools; non-empty when a sub-agent fired
+                # (currently only the log-triage Haiku sub-agent inside
+                # kubectl_get_container_logs above the size threshold). The
+                # delta is attributed to THIS tool's bucket.
+                result, metrics_delta = execute_tool(block.name, dict(block.input))
+                for sub_name, count in metrics_delta.get("sub_agent_calls", {}).items():
+                    tm.sub_agent_calls[sub_name] = (
+                        tm.sub_agent_calls.get(sub_name, 0) + count
+                    )
+                tm.sub_agent_cost_usd += metrics_delta.get("sub_agent_cost_usd", 0.0)
                 if verbose:
                     print(f"[turn {turn}] tool result: {len(result)} bytes, head: {result[:150]!r}", file=sys.stderr)
+                    if metrics_delta:
+                        print(f"[turn {turn}] sub-agent delta: {metrics_delta}", file=sys.stderr)
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -308,7 +343,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 total_output_tokens=total_output_tokens,
                 total_cache_creation_tokens=total_cache_creation_tokens,
                 total_cache_read_tokens=total_cache_read_tokens,
-                tool_calls_summary=tool_calls_summary,
+                tool_metrics=tool_metrics,
                 termination="end_turn_without_findings",
             )
 
@@ -325,7 +360,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 total_output_tokens=total_output_tokens,
                 total_cache_creation_tokens=total_cache_creation_tokens,
                 total_cache_read_tokens=total_cache_read_tokens,
-                tool_calls_summary=tool_calls_summary,
+                tool_metrics=tool_metrics,
                 termination="max_tokens",
             )
 
@@ -342,7 +377,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 total_output_tokens=total_output_tokens,
                 total_cache_creation_tokens=total_cache_creation_tokens,
                 total_cache_read_tokens=total_cache_read_tokens,
-                tool_calls_summary=tool_calls_summary,
+                tool_metrics=tool_metrics,
                 termination=f"unexpected_{response.stop_reason}",
             )
 
@@ -359,7 +394,7 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
         total_output_tokens=total_output_tokens,
         total_cache_creation_tokens=total_cache_creation_tokens,
         total_cache_read_tokens=total_cache_read_tokens,
-        tool_calls_summary=tool_calls_summary,
+        tool_metrics=tool_metrics,
         termination="max_turns_exhausted",
     )
 
@@ -417,7 +452,7 @@ def _build_metrics(
     output_tokens: int,
     cache_creation_input_tokens: int,
     cache_read_input_tokens: int,
-    tool_calls_summary: dict[str, int],
+    tool_metrics: dict[str, ToolMetrics] | None = None,
     termination: str | None = None,
 ) -> Metrics:
     """Build the Metrics record that accompanies every Findings.
@@ -425,6 +460,14 @@ def _build_metrics(
     Shape is intentionally close to ARCHITECTURE.md's DiagnosisResponse
     schema so the orchestrator (Step 4.5) can project these directly into
     HandoffRequest.status.metrics without reshaping.
+
+    `tool_metrics` is a per-tool dict keyed by tool name. Each entry's
+    sub_agent_calls / sub_agent_cost_usd are attributed to the parent
+    tool (e.g., log_triage sub-agent costs roll up under
+    kubectl_get_container_logs). Parent's own input_tokens /
+    output_tokens / cost_usd cover ONLY the parent's Anthropic calls —
+    sub-agent token usage stays separate from the parent's so fat-tool
+    budgets are visible per-tool.
     """
     wall_clock = round(time.monotonic() - start_time, 2)
     cost = _compute_cost_usd(
@@ -434,6 +477,16 @@ def _build_metrics(
         cache_creation_input_tokens,
         cache_read_input_tokens,
     )
+    # Sort tools alphabetically for output stability; round per-tool
+    # sub-agent costs to keep JSON output tidy.
+    sorted_tools: dict[str, ToolMetrics] = {}
+    for name in sorted((tool_metrics or {}).keys()):
+        tm = (tool_metrics or {})[name]
+        sorted_tools[name] = ToolMetrics(
+            call_count=tm.call_count,
+            sub_agent_calls=dict(sorted(tm.sub_agent_calls.items())),
+            sub_agent_cost_usd=round(tm.sub_agent_cost_usd, 6),
+        )
     return Metrics(
         model=model,
         turns_used=turns_used,
@@ -443,7 +496,7 @@ def _build_metrics(
         cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
         cost_usd=cost,
-        tool_calls_summary=dict(sorted(tool_calls_summary.items())),
+        tools=sorted_tools,
         termination=termination,
     )
 
@@ -458,7 +511,7 @@ def _build_degraded_result(
     total_output_tokens: int,
     total_cache_creation_tokens: int,
     total_cache_read_tokens: int,
-    tool_calls_summary: dict[str, int],
+    tool_metrics: dict[str, ToolMetrics] | None = None,
     termination: str,
 ) -> AgentResult:
     """Construct the AgentResult for any degenerate termination path."""
@@ -472,7 +525,7 @@ def _build_degraded_result(
             output_tokens=total_output_tokens,
             cache_creation_input_tokens=total_cache_creation_tokens,
             cache_read_input_tokens=total_cache_read_tokens,
-            tool_calls_summary=tool_calls_summary,
+            tool_metrics=tool_metrics,
             termination=termination,
         ),
     )
@@ -488,7 +541,7 @@ def _build_error_result(
     total_output_tokens: int,
     total_cache_creation_tokens: int,
     total_cache_read_tokens: int,
-    tool_calls_summary: dict[str, int],
+    tool_metrics: dict[str, ToolMetrics] | None = None,
     termination: str,
 ) -> AgentResult:
     """Construct the AgentResult for an Anthropic API error.
@@ -506,6 +559,6 @@ def _build_error_result(
         total_output_tokens=total_output_tokens,
         total_cache_creation_tokens=total_cache_creation_tokens,
         total_cache_read_tokens=total_cache_read_tokens,
-        tool_calls_summary=tool_calls_summary,
+        tool_metrics=tool_metrics,
         termination=termination,
     )

@@ -1,0 +1,83 @@
+# evals/scenarios/pod-launch/crashloop-missing-env.expected.yaml
+#
+# A strong Findings traces:
+#   1. Container is in CrashLoopBackOff (POST-START-FAILURE phase).
+#   2. Logs explicitly say DB_URL is required but not set (missing env var).
+#   3. Remediation: set the env var via env: / envFrom ConfigMap/Secret.
+#
+# A weak Findings would say "the container is crashing, fix the bug."
+#
+# Sub-agent contract validation (asserted via metricsMustSatisfy in PR-9a's
+# eval verifier — for now this scenario is verified manually by reading
+# the agent's metrics output):
+#   - tool_calls_summary should include kubectl_get_container_logs ≥ 1.
+#   - sub_agent_calls should include {"log_triage": ≥ 1}.
+#   - sub_agent_cost_usd should be > 0 (Haiku fired at least once).
+#   - confidence should be at least medium (logs contain unambiguous signal).
+
+target:
+  scenarioName: crashloop-missing-env
+  namespace: eval-crashloop-missing-env
+  podName: panicking-app
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # Problem statement must name the missing env var concept AND a
+  # recognizable phase signal (crashloop / panic / FATAL / exit).
+  problemMustMention:
+    anyOf:
+      - DB_URL
+      - environment variable
+      - env var
+      - missing
+      - not set
+      - CrashLoopBackOff
+      - panic
+      - FATAL
+      - crashloop
+
+  problemMustNotMention:
+    # If the agent blames any of these, it ignored the log signal.
+    - image pull
+    - imagepullbackoff
+    - imagepullsecret
+    - PodDisruptionBudget
+    - taint
+    - quota
+    - readiness probe
+    - networkpolicy
+    - nodeSelector
+    - insufficient cpu
+
+  # Remediations must reference how to provide the missing env var,
+  # OR what changes would unblock the crash.
+  remediationsMustInclude:
+    anyOf:
+      - DB_URL
+      - environment variable
+      - env var
+      - envFrom
+      - ConfigMap
+      - Secret
+      - env:
+      - set the variable
+      - add the variable
+      - provide the variable
+      - inject
+
+  # Preventive improvements should point at one of the standard
+  # categories that catch this class of issue.
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pod_spec
+      - configuration
+      - admission_control
+      - monitoring
+      - validation
+      - testing
+      - secrets_management
+
+  alsoCheckMustInclude:
+    nonEmpty: true

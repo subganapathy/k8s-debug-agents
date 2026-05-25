@@ -1,0 +1,75 @@
+# evals/scenarios/pod-launch/slow-readiness-probe.expected.yaml
+#
+# Verifies the LATENCY LENS proof point:
+#   - bootstrap correctly computes per-phase timing from .status.conditions
+#   - the <launch_timing> block in the first user message activates the
+#     latency lens prompt section
+#   - the agent identifies the slow phase (initialized_to_containers_ready)
+#   - the agent reads the readinessProbe spec and names initialDelaySeconds
+#     as the cause
+#   - remediation suggests lowering the delay with reasoning
+#
+# What makes a "strong" latency-lens Findings:
+#   - confidence=high (timing data is direct evidence; probe spec confirms cause)
+#   - problem statement names the slow phase explicitly AND the
+#     initialDelaySeconds value (45)
+#   - remediation: concrete YAML or kubectl-edit guidance to lower
+#     initialDelaySeconds
+#   - improvements category: scheduling, pod_spec, or
+#     probe_configuration
+
+target:
+  scenarioName: slow-readiness-probe
+  namespace: eval-slow-readiness-probe
+  podName: slow-ready-app
+
+expected:
+  outputKind: Findings
+  confidenceAtLeast: medium
+
+  # Problem statement must name the slow-launch nature OR the probe
+  # mechanism.
+  problemMustMention:
+    anyOf:
+      - readiness probe
+      - readinessProbe
+      - initialDelaySeconds
+      - slow launch
+      - slow to be Ready
+      - latency
+      - time to ready
+      - 45
+      - long pole
+
+  problemMustNotMention:
+    # Pod is Ready=true and healthy. If the agent named any of these,
+    # it ignored the timing signal and went down the wrong playbook.
+    - CrashLoopBackOff
+    - ImagePullBackOff
+    - PodDisruptionBudget
+    - quota
+    - insufficient cpu
+    - taint
+    - exit code
+
+  remediationsMustInclude:
+    anyOf:
+      - initialDelaySeconds
+      - probe
+      - lower
+      - reduce
+      - failureThreshold
+      - periodSeconds
+      - startupProbe
+
+  improvementsMustIncludeCategory:
+    anyOf:
+      - pod_spec
+      - probe_configuration
+      - scheduling
+      - monitoring
+      - observability
+      - performance
+
+  alsoCheckMustInclude:
+    nonEmpty: true
