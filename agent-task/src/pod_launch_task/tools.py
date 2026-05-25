@@ -56,7 +56,7 @@ from kubernetes.dynamic.exceptions import (
     ResourceNotFoundError,
 )
 
-from pod_launch_task.findings import Findings
+from pod_launch_task.schemas import Findings
 from pod_launch_task.log_triage import (
     SMALL_LOG_THRESHOLD,
     triage_logs_with_fallback,

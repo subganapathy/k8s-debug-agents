@@ -61,7 +61,7 @@ expected:
       - envFrom
       - ConfigMap
       - Secret
-      - env:
+      - "env:"
       - set the variable
       - add the variable
       - provide the variable

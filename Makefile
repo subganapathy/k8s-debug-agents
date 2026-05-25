@@ -51,6 +51,9 @@ help: ## Show this help
 	@echo "Agent (Step 4):"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^agent-' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
+	@echo "Pre-merge gate (Step 4):"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(eval|verify):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
+	@echo ""
 	@echo "Security guardrails:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | grep -E '^(install-pre-commit|security-scan):' | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-30s\033[0m %s\n", $$1, $$2}'
 	@echo ""
@@ -276,6 +279,26 @@ scenario-clean: ## Clean up a scenario fixture. Usage: make scenario-clean SCENA
 scenario-list: ## List available scenario fixtures
 	@echo "Available scenarios in $(SCENARIO_DIR):"
 	@ls -1 $(SCENARIO_DIR)/*.yaml 2>/dev/null | grep -v '.expected.yaml' | sed 's|$(SCENARIO_DIR)/||; s|\.yaml$$||; s|^|  |'
+
+.PHONY: verify
+verify: security-scan eval ## Pre-PR + pre-merge gate: gitleaks secret scan + 9-scenario eval. Run BOTH (a) before opening the PR AND (b) again before merging — the second run catches any drift between open and merge.
+
+.PHONY: eval
+eval: ## Run the eval harness against all scenarios. Asserts each .expected.yaml spec end-to-end. Usage: make eval [SCENARIO=name] [JSON=1]
+	@test -n "$$ANTHROPIC_API_KEY" || { \
+	  echo "ERROR: ANTHROPIC_API_KEY not set. See agent-task/README.md for setup."; \
+	  exit 2; \
+	}
+	@test -d $(AGENT_DIR)/.venv || { \
+	  echo "ERROR: venv not found at $(AGENT_DIR)/.venv. Run 'make agent-setup' first."; \
+	  exit 1; \
+	}
+	@EVAL_ARGS=""; \
+	if [ -n "$(SCENARIO)" ]; then EVAL_ARGS="$$EVAL_ARGS --scenario $(SCENARIO)"; fi; \
+	if [ -n "$(JSON)" ]; then EVAL_ARGS="$$EVAL_ARGS --json"; fi; \
+	if [ -n "$(SKIP_APPLY)" ]; then EVAL_ARGS="$$EVAL_ARGS --skip-apply"; fi; \
+	if [ -n "$(SKIP_CLEAN)" ]; then EVAL_ARGS="$$EVAL_ARGS --skip-clean"; fi; \
+	$(AGENT_DIR)/.venv/bin/python evals/run_evals.py $$EVAL_ARGS
 
 # ─── Agent (Step 4) ────────────────────────────────────────────────────────────
 # Standalone agent runner. Requires ANTHROPIC_API_KEY in env and an active

@@ -1,28 +1,34 @@
-"""Pydantic models — the single source of truth for the agent's output contract.
+"""Pydantic schemas — the single source of truth for the agent's typed contracts.
 
-Why these models exist:
+Holds three groups of types:
 
-1. **One Findings shape across every consumer.** The same Pydantic class is
-   used by:
-   - `emit_findings` tool's `input_schema` (generated via `model_json_schema()`
-     — no hand-maintained JSON Schema that can drift from the Python type).
-   - `run_agent()` return value (wrapped in `AgentResult`).
-   - The eval harness verifier (PR-9 will `Findings.model_validate(...)`
-     against this).
-   - Step 4.5's `HandoffRequest.status.findings` CRD field, whose
-     `openAPIV3Schema` will be generated from this same model.
+1. **Variant output contract** (Evidence, Remediation, Improvement,
+   Findings, ToolMetrics, Metrics, AgentResult) — what every agent-task
+   variant emits. Used by:
+   - `emit_findings` tool's `input_schema` (generated via
+     `Findings.model_json_schema()` — no hand-maintained JSON Schema
+     that can drift from the Python type).
+   - `run_agent()` return value (`AgentResult`).
+   - The eval harness verifier in `evals/run_evals.py`.
+   - Step 4.5's `HandoffRequest.status.findings` + `.metrics` CRD
+     fields, whose `openAPIV3Schema` will be generated from these models.
 
-2. **Uniform across LLM-driven AND deterministic variants.** A deterministic
-   agent-task (e.g., a `pod_existence_check` variant that just returns
-   "pod was deleted") emits the same `Findings` shape. The `Metrics`
-   fields that are LLM-specific (token counts, cache_*, model, turns_used)
-   are Optional / default to 0, so deterministic variants populate just
-   `wall_clock_seconds` (and maybe `termination`).
+2. **Sub-agent output contracts** (LogAnalysis) — structured outputs
+   sub-agents emit to their parent variant. Same `model_json_schema()`
+   pattern drives the sub-agent's sentinel tool input_schema.
 
-3. **Validation catches structured-output bugs.** When the LLM emits an
-   `emit_findings` call with a malformed shape (missing field, wrong type),
-   `Findings.model_validate()` surfaces it as a structured error result
-   instead of silent corruption downstream.
+3. **Uniform across LLM-driven AND deterministic variants.** A
+   deterministic agent-task (e.g., a future `pod_existence_check` that
+   just returns "pod was deleted") emits the same `Findings` shape.
+   The LLM-specific Metrics fields (token counts, cache_*, model,
+   turns_used) are Optional / default to 0, so deterministic variants
+   populate just `wall_clock_seconds` (and maybe `termination`).
+
+4. **Validation catches structured-output bugs.** When the LLM emits an
+   `emit_findings` (or `emit_log_analysis`) call with a malformed shape
+   (missing field, wrong type, wrong enum), `model_validate()` surfaces
+   it as a structured error result instead of silent corruption
+   downstream.
 
 Field naming follows the existing JSON wire format exactly:
 - `Findings.alsoCheck` (camelCase, matches what the agent has emitted since PR-8).
