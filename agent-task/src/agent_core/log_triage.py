@@ -27,7 +27,7 @@ from typing import Any
 import anthropic
 from pydantic import ValidationError
 
-from pod_launch_task.schemas import LogAnalysis
+from agent_core.schemas import LogAnalysis, ToolExecutionResult, ToolMetricsDelta
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -146,7 +146,7 @@ def triage_logs(
     raw_logs: str,
     hypothesis_hint: str | None = None,
     client: anthropic.Anthropic | None = None,
-) -> tuple[LogAnalysis, dict[str, Any]]:
+) -> tuple[LogAnalysis, ToolMetricsDelta]:
     """Single-turn Haiku call. Returns (validated LogAnalysis, metrics_delta).
 
     Args:
@@ -218,11 +218,10 @@ def triage_logs(
         )
 
     cost = _compute_sub_agent_cost(SUB_AGENT_MODEL, response.usage)
-    metrics_delta: dict[str, Any] = {
-        "sub_agent_calls": {"log_triage": 1},
-        "sub_agent_cost_usd": cost,
-    }
-    return analysis, metrics_delta
+    return analysis, ToolMetricsDelta(
+        sub_agent_calls={"log_triage": 1},
+        sub_agent_cost_usd=cost,
+    )
 
 
 # ─── Fallback wrapper (the function _exec_logs actually calls) ───────────────
@@ -232,13 +231,14 @@ def triage_logs_with_fallback(
     raw_logs: str,
     hypothesis_hint: str | None = None,
     client: anthropic.Anthropic | None = None,
-) -> tuple[str, dict[str, Any]]:
+) -> ToolExecutionResult:
     """Wraps `triage_logs` and degrades to truncated raw logs on any failure.
 
     This is the function `tools._exec_logs` actually calls. It guarantees
-    the parent agent never sees an exception — it always gets a string
-    content (either the structured LogAnalysis JSON, or a truncated raw
-    log dump with a degradation note) and a metrics_delta dict.
+    the parent agent never sees an exception — it always returns a
+    `ToolExecutionResult` whose `source` distinguishes which branch ran
+    (`log_triage` for the sub-agent success path, `fallback` for the
+    degradation path).
 
     Failure modes covered:
       - Anthropic API errors after retries (auth, rate limit exhausted,
@@ -246,12 +246,15 @@ def triage_logs_with_fallback(
       - Sub-agent returns malformed output (missing field, wrong type,
         didn't call emit_log_analysis) — caught as `pydantic.ValidationError`.
 
-    Returns:
-        (content, metrics_delta) — same shape as triage_logs on success.
-        On failure:
-          - content = "[LOG_TRIAGE_FALLBACK: ...] ... raw log dump ...".
-          - metrics_delta = {} (empty — sub-agent invocation discarded;
-            small Haiku cost for the failed call is not surfaced).
+    On success: `source="kubectl_get_container_logs:log_triage"`,
+                `trust_tier="structured-from-untrusted"` (LogAnalysis is
+                Pydantic-validated but its source data was attacker-
+                controlled raw logs), `metrics_delta` populated.
+
+    On failure: `source="kubectl_get_container_logs:fallback"`,
+                `trust_tier="untrusted"` (we're handing back raw bytes),
+                `metrics_delta` empty (the failed sub-agent's small Haiku
+                cost is not surfaced — small leak we accept).
 
     The fallback content is shaped to be useful to the parent agent
     despite the degradation: head + tail of the raw logs, separated by a
@@ -259,9 +262,18 @@ def triage_logs_with_fallback(
     """
     try:
         analysis, metrics_delta = triage_logs(raw_logs, hypothesis_hint, client)
-        return (analysis.model_dump_json(), metrics_delta)
+        return ToolExecutionResult(
+            content=analysis.model_dump_json(),
+            source="kubectl_get_container_logs:log_triage",
+            trust_tier="structured-from-untrusted",
+            metrics_delta=metrics_delta,
+        )
     except (anthropic.AnthropicError, ValidationError) as e:
-        return (_fallback_truncated(raw_logs, reason=type(e).__name__), {})
+        return ToolExecutionResult(
+            content=_fallback_truncated(raw_logs, reason=type(e).__name__),
+            source="kubectl_get_container_logs:fallback",
+            trust_tier="untrusted",
+        )
 
 
 def _fallback_truncated(raw_logs: str, reason: str) -> str:

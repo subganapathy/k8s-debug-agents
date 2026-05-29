@@ -1,0 +1,30 @@
+# Gitleaks configuration — allowlist for known false positives.
+#
+# Gitleaks ships with ~150 default detectors (Anthropic, OpenAI, AWS, GitHub,
+# etc.). Sometimes a documentation placeholder or test fixture trips a
+# detector even though there's no real secret involved. This file lists
+# those known-safe patterns so `make security-scan` and `make verify`
+# can stay green.
+#
+# How this loads: gitleaks looks for `.gitleaks.toml` at the working tree
+# root by default. The pre-commit hook + the CLI both honor it.
+#
+# Format reference: https://github.com/gitleaks/gitleaks#configuration
+
+# Extend the built-in default rules (don't replace them).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe placeholders that gitleaks's default detectors flag"
+
+# A literal "PLACEHOLDER-DO-NOT-USE" appears in
+# evals/credential-flow/test-pod.yaml line 100 as the value of an
+# x-api-key header in a curl command. The Step-3 credential-pipeline
+# end-to-end test (PR #5) verifies that Istio's ext_authz REPLACES this
+# placeholder with the real key before the request leaves the pod. The
+# placeholder is intentional documentation of the substitution pattern;
+# no real secret is involved.
+regexes = [
+    '''PLACEHOLDER-DO-NOT-USE''',
+]
