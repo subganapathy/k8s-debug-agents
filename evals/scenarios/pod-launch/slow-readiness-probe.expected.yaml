@@ -38,7 +38,7 @@ expected:
       - slow to be Ready
       - latency
       - time to ready
-      - 45
+      - "45"
       - long pole
 
   problemMustNotMention:

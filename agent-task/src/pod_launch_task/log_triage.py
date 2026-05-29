@@ -27,7 +27,7 @@ from typing import Any
 import anthropic
 from pydantic import ValidationError
 
-from pod_launch_task.findings import LogAnalysis
+from pod_launch_task.schemas import LogAnalysis
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 

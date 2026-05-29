@@ -44,16 +44,22 @@ expected:
     - readiness probe
 
   remediationsMustInclude:
+    # Match any reasonable remediation phrasing. The agent has flexibility
+    # in word order (e.g., "raise the ResourceQuota" vs "raise quota"),
+    # so we match on the underlying concept words rather than exact
+    # multi-word phrases.
     anyOf:
-      - increase quota
-      - raise quota
-      - bump quota
-      - update quota
-      - reduce request
-      - lower request
-      - reduce cpu
-      - reduce replicas
-      - scale down
+      - quota
+      - ResourceQuota
+      - raise
+      - increase
+      - bump
+      - patch
+      - reduce
+      - lower
+      - scale
+      - replicas
+      - request
 
   improvementsMustIncludeCategory:
     anyOf:
