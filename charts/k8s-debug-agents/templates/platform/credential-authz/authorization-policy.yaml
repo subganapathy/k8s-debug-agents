@@ -52,24 +52,31 @@ spec:
       app.kubernetes.io/component: credential-authz
   action: ALLOW
   rules:
-    # Rule 1: per-invocation agent Job SAs (agent-job-<uid>) in any
-    # namespace. PR-10's per-target Job model puts variant Jobs in the
-    # target pod's namespace; SA names follow the dispatcher's
-    # naming convention (Kyverno-enforced in PR-16).
+    # Lightweight L7 backstop: requires the caller to be in our trust
+    # domain (mesh peer with a valid SPIFFE identity from istiod).
+    #
+    # The TIGHT runtime access enforcement lives in the NetworkPolicy
+    # (see ./network-policy.yaml). NetworkPolicy filters by pod LABEL
+    # (`app.kubernetes.io/component: agent-task` +
+    # `agent-task/created-by ∈ {cli, dispatcher}`), which works across
+    # arbitrary target namespaces — something Istio AuthorizationPolicy
+    # can't do because its `principals` field doesn't support
+    # segment-wise wildcards on SPIFFE URIs.
+    #
+    # Layered defense (top = first gate hit):
+    #   1. NetworkPolicy        — L3/L4 pod-label gate (primary)
+    #   2. PeerAuthentication   — STRICT mTLS handshake
+    #   3. AuthorizationPolicy  — this rule (mesh peer presence check)
+    #   4. Kyverno (PR-16)      — admission-time label & RBAC enforcement
+    #
+    # Why keep this rule at all: defense in depth. If someone disables
+    # NetworkPolicy enforcement at the CNI level (or runs a CNI that
+    # silently doesn't support it), AuthorizationPolicy still blocks
+    # non-mesh callers. Cheap to keep.
     - from:
         - source:
             principals:
-              - "cluster.local/ns/*/sa/agent-job-*"
-      to:
-        - operation:
-            ports:
-              - {{ .Values.credentialAuthz.port | quote }}
-    # Rule 2: the credential-flow Step-3 verification pod. Keeps
-    # `make test-credential-flow` working through chart upgrades.
-    - from:
-        - source:
-            principals:
-              - "cluster.local/ns/*/sa/credential-flow-test"
+              - "cluster.local/*"
       to:
         - operation:
             ports:

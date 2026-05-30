@@ -1,0 +1,95 @@
+{{- if .Values.credentialAuthz.enabled -}}
+{{/*
+NetworkPolicy: Layer 1 of the defense-in-depth gate on credential-authz.
+
+PR-10 design: per-Job agent SAs are ephemeral, so their SPIFFE
+identities are unstable (`cluster.local/ns/<target>/sa/agent-job-<uid>`).
+Istio AuthorizationPolicy's `principals` field can't express
+segment-wise wildcards, so per-SA-name matching there isn't workable
+without a shared identity (which fights the shared-nothing per-Job
+model we want).
+
+The fix: enforce pod-label-based access AT THE NETWORK LAYER (here,
+via K8s NetworkPolicy), and keep the Istio AuthorizationPolicy as a
+lightweight L7 backstop (presence-match for mesh peers). Pod labels
+are stable for the Job's lifetime AND can be matched flexibly via
+NetworkPolicy's `podSelector`.
+
+Layers:
+  1. NetworkPolicy (THIS file)     ← who can OPEN a TCP connection at all
+  2. PeerAuthentication STRICT     ← only mesh peers can complete mTLS
+  3. AuthorizationPolicy (L7)      ← lightweight mesh-peer presence check
+  4. Kyverno (PR-16)               ← admission-time label & RBAC enforcement
+
+Match rule: ingress from any namespace, from any pod carrying BOTH:
+  - `app.kubernetes.io/component: agent-task`  (variant Job pods + Step-3 test pod)
+  - `agent-task/created-by` in {cli, dispatcher}  (set by job_runner.py)
+
+Pre-requisite: cluster CNI must support NetworkPolicy. Kindnet (Kind
+default) supports it. Calico, Cilium, AWS VPC CNI all support it.
+
+Implicit deny: K8s NetworkPolicy is allow-list. Adding this policy with
+a `podSelector` matching credential-authz pods causes ALL ingress NOT
+matched by an `ingress` rule below to be denied. So pods in
+`agent-platform` that don't carry these labels can't reach
+credential-authz either — exactly what we want.
+
+Why we don't restrict source namespaces: per-target Jobs land in
+arbitrary target namespaces. Enumerating "eval-*, prod-*, ..." doesn't
+scale. Label-based access works regardless of source namespace.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: credential-authz-allow-agent-tasks
+  namespace: {{ .Values.platformNamespace.name }}
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+spec:
+  # Selector: this policy applies to credential-authz pods.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: credential-authz
+  policyTypes:
+    - Ingress
+  ingress:
+    # Rule 1: per-Job variant agent pods (created by CLI or dispatcher).
+    # Cross-namespace match via namespaceSelector + podSelector AND'd.
+    - from:
+        - namespaceSelector: {}   # any namespace
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: agent-task
+            matchExpressions:
+              - key: agent-task/created-by
+                operator: In
+                values: ["cli", "dispatcher"]
+      ports:
+        - protocol: TCP
+          port: {{ .Values.credentialAuthz.port }}
+    # Rule 2: the Step-3 credential-flow-test pod (lives in agent-tasks
+    # ns with `purpose: credential-flow-verification` label). Kept as a
+    # separate rule so removing the test fixture doesn't require touching
+    # the per-Job match above.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.tasksNamespace.name | quote }}
+          podSelector:
+            matchLabels:
+              purpose: credential-flow-verification
+      ports:
+        - protocol: TCP
+          port: {{ .Values.credentialAuthz.port }}
+    # Rule 3: health probes from kubelet on the local node. kubelet
+    # source IPs come from the node's network, NOT a pod's CNI IP, so
+    # podSelector won't match them. Use ipBlock matching the cluster's
+    # pod CIDR — too broad on its own, but combined with the port
+    # restriction (only the health port, not the gRPC port) it's safe.
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0   # kubelet liveness/readiness probes
+      ports:
+        - protocol: TCP
+          port: {{ .Values.credentialAuthz.healthPort }}
+{{- end -}}

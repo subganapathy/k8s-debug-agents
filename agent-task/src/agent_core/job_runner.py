@@ -57,13 +57,28 @@ RBAC_PROPAGATION_SLEEP_SECONDS = 2
 # to the SA/Role/RoleBinding owned by the Job.
 JOB_TTL_SECONDS_AFTER_FINISHED = 300
 
-# Resource ask. Generous enough for the agent loop's spikes (Anthropic SDK
-# does HTTP/2 mux + JSON serdes); tight enough to fit into modest namespace
-# quotas. Spike-tolerant via limit > request.
-AGENT_CPU_REQUEST = "100m"
-AGENT_CPU_LIMIT = "1"
-AGENT_MEM_REQUEST = "256Mi"
-AGENT_MEM_LIMIT = "1Gi"
+# Resource ask. Agent is mostly I/O bound (waiting on Anthropic API
+# round-trips); CPU bursts are small (JSON serdes, prompt rendering).
+# Memory dominated by the Python interpreter + Anthropic SDK (~150 MB).
+#
+# Tight on purpose so we fit in namespaces with restrictive ResourceQuotas
+# (per-target Job model means we may land in user namespaces with quotas
+# tuned to their own workloads). Sidecar resources are capped separately
+# via the proxy.istio.io/proxyCPU{Limit,Request} annotations on the Pod.
+AGENT_CPU_REQUEST = "50m"
+AGENT_CPU_LIMIT = "500m"
+AGENT_MEM_REQUEST = "192Mi"
+AGENT_MEM_LIMIT = "512Mi"
+
+# Istio sidecar resource caps. Default Istio sidecar requests 100m CPU,
+# limits 2000m — which alone exceeds many namespace quotas. We override
+# via pod annotations to keep the sidecar small. These cover the basic
+# mTLS + HTTP filter chain; if our request rate spikes, the limits give
+# headroom without burning standing quota.
+SIDECAR_CPU_REQUEST = "20m"
+SIDECAR_CPU_LIMIT = "200m"
+SIDECAR_MEM_REQUEST = "64Mi"
+SIDECAR_MEM_LIMIT = "192Mi"
 
 
 def create_handoff_request(
@@ -122,6 +137,7 @@ def build_variant_job(
     common_labels: dict[str, str],
     hr_owner_ref: client.V1OwnerReference,
     job_name: str,
+    prefer_node: str | None = None,
 ) -> client.V1Job:
     """Construct the Job spec without submitting.
 
@@ -156,6 +172,35 @@ def build_variant_job(
         "sidecar.istio.io/inject": "true",
         "app.kubernetes.io/component": "agent-task",
         "agent-task/variant": variant,
+    }
+
+    # Istio sidecar resource caps applied via Pod annotations. The default
+    # istiod sidecar template requests 100m CPU + 128Mi RAM, limits 2000m
+    # CPU + 1Gi RAM — which alone exceeds many namespace ResourceQuotas
+    # (per-target Job model lands us in user namespaces we don't control).
+    # The annotations below shrink the sidecar to a footprint that fits
+    # most realistic quotas.
+    #
+    # Narrow apiserver bypass: `excludeOutboundIPRanges` set to ONLY
+    # the apiserver's specific clusterIP (10.96.0.1/32 by Kind default),
+    # NOT the whole service CIDR. Under restrictive Istio Sidecar mode,
+    # Envoy has the apiserver cluster + healthy endpoint but the
+    # listener→cluster routing doesn't fire correctly for apiserver
+    # traffic — debugging that requires DestinationRule + TLS settings
+    # we're not ready to commit to in PR-10. The narrow bypass means:
+    #   - apiserver (10.96.0.1:443) goes DIRECT bypassing Istio
+    #   - every OTHER ClusterIP destination still gated by Sidecar
+    # Egress NetworkPolicy still enforces "ports 443/6443 to anywhere"
+    # so the bypass doesn't widen our network-layer egress surface.
+    #
+    # Wave-A: chartify the apiserver IP. Production clusters use
+    # different service CIDRs (EKS: 172.20.0.1, GKE: varies).
+    pod_annotations = {
+        "sidecar.istio.io/proxyCPU": SIDECAR_CPU_REQUEST,
+        "sidecar.istio.io/proxyCPULimit": SIDECAR_CPU_LIMIT,
+        "sidecar.istio.io/proxyMemory": SIDECAR_MEM_REQUEST,
+        "sidecar.istio.io/proxyMemoryLimit": SIDECAR_MEM_LIMIT,
+        "traffic.sidecar.istio.io/excludeOutboundIPRanges": "10.96.0.1/32",
     }
 
     init_container = client.V1Container(
@@ -213,6 +258,38 @@ def build_variant_job(
         ],
     )
 
+    # Node colocation: when the target pod has been scheduled, prefer
+    # the Job land on the same node. Makes container-runtime queries
+    # (logs, exec, status) local-loopback fast and avoids cross-AZ hops
+    # in cloud clusters. For pod-launch variants where the target pod
+    # is often Pending (no node assigned), prefer_node will be None
+    # and the Job lands on any node — same as before.
+    #
+    # `preferred` (not `required`): if the target node is at capacity,
+    # the Job still admits onto another node rather than being stuck.
+    # Soft co-location is a latency optimization, not a correctness
+    # requirement.
+    affinity = None
+    if prefer_node:
+        affinity = client.V1Affinity(
+            node_affinity=client.V1NodeAffinity(
+                preferred_during_scheduling_ignored_during_execution=[
+                    client.V1PreferredSchedulingTerm(
+                        weight=100,
+                        preference=client.V1NodeSelectorTerm(
+                            match_expressions=[
+                                client.V1NodeSelectorRequirement(
+                                    key="kubernetes.io/hostname",
+                                    operator="In",
+                                    values=[prefer_node],
+                                ),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+        )
+
     pod_spec = client.V1PodSpec(
         service_account_name=sa_name,
         restart_policy="Never",
@@ -221,6 +298,7 @@ def build_variant_job(
         host_ipc=False,
         init_containers=[init_container],
         containers=[agent_container],
+        affinity=affinity,
         volumes=[
             client.V1Volume(name="tmp", empty_dir=client.V1EmptyDirVolumeSource()),
         ],
@@ -246,7 +324,10 @@ def build_variant_job(
             backoff_limit=0,  # all-or-nothing per design_variant_retry_semantics
             ttl_seconds_after_finished=JOB_TTL_SECONDS_AFTER_FINISHED,
             template=client.V1PodTemplateSpec(
-                metadata=client.V1ObjectMeta(labels=pod_labels),
+                metadata=client.V1ObjectMeta(
+                    labels=pod_labels,
+                    annotations=pod_annotations,
+                ),
                 spec=pod_spec,
             ),
         ),

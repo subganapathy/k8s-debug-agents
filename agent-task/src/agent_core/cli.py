@@ -138,11 +138,22 @@ def _run_variant(args: argparse.Namespace) -> int:
     )
     hr_uid = hr_obj["metadata"]["uid"]
 
+    # Best-effort node colocation: if the target pod has already been
+    # scheduled, ask the Job's pod to prefer the same node so container-
+    # runtime queries (logs, exec) are local-loopback fast. Pending
+    # pods (insufficient-cpu, taint scenarios, etc.) have no nodeName —
+    # we just skip the affinity and the Job lands on any node.
+    prefer_node = _lookup_target_node(target_namespace, pod_name)
+    if prefer_node:
+        log(f"target pod is on node '{prefer_node}'; preferring colocation")
+
     log(f"building Job {target_namespace}/{job_name} (image={args.image})")
-    # Build the Job spec *without* SA name resolved yet. We compute the SA
-    # name from hr_uid (which RBAC provisioner uses too) so both sides
-    # agree without a circular dependency.
-    sa_name = f"agent-job-{hr_uid[:6]}"
+    # Per-Job SA — name derived from HR UID. Each invocation gets its
+    # own SA, owned by the Job for TTL cascade cleanup. Tight runtime
+    # access enforcement comes from the NetworkPolicy on credential-authz
+    # (which matches on pod labels, not SA name) + Istio mTLS, not from
+    # the SA identity. See charts/.../credential-authz/network-policy.yaml.
+    sa_name = f"{rbac_provisioner.AGENT_TASK_SA_NAME_PREFIX}{hr_uid[:6]}"
 
     hr_owner = job_runner.hr_owner_ref(hr_obj)
     job_spec = job_runner.build_variant_job(
@@ -157,6 +168,7 @@ def _run_variant(args: argparse.Namespace) -> int:
         common_labels=common_labels,
         hr_owner_ref=hr_owner,
         job_name=job_name,
+        prefer_node=prefer_node,
     )
 
     # Provision RBAC first (so the SA exists when the Job spec references
@@ -205,6 +217,21 @@ def _run_variant(args: argparse.Namespace) -> int:
     print(result.model_dump_json(indent=2))
 
     return 0 if phase == "Completed" else 1
+
+
+def _lookup_target_node(namespace: str, pod_name: str) -> str | None:
+    """Return the node the target pod is scheduled on, or None if the
+    pod is Pending / doesn't exist / lookup fails.
+
+    Used for soft node colocation of the agent Job. Failures here are
+    non-fatal — the Job just lands on any node when nodeName is unknown.
+    """
+    try:
+        api = client.CoreV1Api()
+        pod = api.read_namespaced_pod(name=pod_name, namespace=namespace)
+        return pod.spec.node_name or None
+    except client.ApiException:
+        return None
 
 
 def _agent_result_from_hr_status(hr_obj: dict[str, Any]) -> AgentResult:
