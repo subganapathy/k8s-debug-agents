@@ -53,7 +53,7 @@ The harness is a single Python file (`evals/run_evals.py`) with two classes:
 1. **`Verifier`** — pure function. Given an `AgentResult` and a parsed spec, returns a `VerificationReport` with per-check pass/fail. No cluster, no subprocess. Unit-testable against cached agent outputs.
 2. **`Harness`** — orchestrator. For each scenario:
    - `subprocess.run(["make", "scenario-apply", "SCENARIO=...", ...])` (unless `--skip-apply`)
-   - `subprocess.run([sys.executable, "-m", "pod_launch_task", "--namespace", ..., "--pod", ..., "--quiet"])`
+   - `subprocess.run([sys.executable, "-m", "agent_core", "--quiet", "pod-launch", "--namespace", ..., "--pod", ...])`
    - `AgentResult.model_validate_json(stdout)` — Pydantic surfaces any malformed agent output as a clean error
    - `verifier.verify(...)` against the spec
    - `subprocess.run(["make", "scenario-clean", "SCENARIO=...", ...])` in `finally` — runs even on crash

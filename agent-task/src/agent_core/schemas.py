@@ -114,6 +114,74 @@ class Findings(BaseModel):
     )
 
 
+class ToolMetricsDelta(BaseModel):
+    """What `execute_tool` reports back to the parent agent loop ABOUT
+    its own execution — specifically, any sub-agent activity it
+    triggered. Defaults are empty/zero so tools that don't fire any
+    sub-agents just construct `ToolMetricsDelta()` with no args.
+
+    The parent loop merges these into the corresponding tool's
+    `ToolMetrics` entry: this delta says "when you invoked
+    kubectl_get_container_logs, log_triage fired once and cost
+    $0.0045" — the loop attributes that to
+    `metrics.tools["kubectl_get_container_logs"].sub_agent_calls` +
+    `.sub_agent_cost_usd`.
+    """
+
+    sub_agent_calls: dict[str, int] = Field(default_factory=dict)
+    sub_agent_cost_usd: float = 0.0
+
+
+class ToolExecutionResult(BaseModel):
+    """What `execute_tool` returns. Four fields with deliberate
+    asymmetry between the raw `content` the LLM consumes (opaque
+    forwarded-as-is) and the structured metadata the agent loop
+    consumes (typed, validated).
+
+    - `content`: the string the LLM sees as `tool_result.content`.
+      May be raw bytes (small log output), JSON (serialized kubectl
+      response or LogAnalysis), or an error message. Always `str`
+      because Anthropic's tool_use protocol takes content as str
+      and the agent code forwards it opaquely — never parses it.
+
+    - `source`: a short label identifying WHO produced this content
+      — e.g., "kubectl_read:Pod", "kubectl_list:Event",
+      "kubectl_get_container_logs:log_triage" (sub-agent ran),
+      "kubectl_get_container_logs:fallback" (sub-agent failed and
+      returned truncated raw), "agent_core" (harness-internal
+      message). The agent loop wraps content in a
+      `<tool_result from='{source}' trust='{trust_tier}'>...</tool_result>`
+      block so the LLM has per-result provenance, not just the
+      global INPUT BOUNDARY clause in the system prompt.
+
+    - `trust_tier`:
+        * `untrusted` — K8s API content (annotations, env vars,
+          labels, log lines — all attacker-writable by a pod's
+          author).
+        * `structured-from-untrusted` — sub-agent outputs that
+          digested untrusted data into a Pydantic-validated form
+          (e.g., LogAnalysis JSON). The SHAPE is now LLM-validated;
+          the underlying source data was still attacker-controlled.
+        * `trusted` — harness-internal messages we wrote ourselves
+          (e.g., "unknown tool", K8s API error strings,
+          "(no log output)").
+
+    - `metrics_delta`: typed sub-agent activity (see
+      `ToolMetricsDelta`).
+
+    Replaces the prior `tuple[str, dict[str, Any]]` contract: IDE
+    autocomplete works, consumers don't need defensive `.get(...)`
+    on the metrics dict, and `source` + `trust_tier` are required
+    at construction so every tool helper participates in the
+    provenance scheme by default.
+    """
+
+    content: str
+    source: str
+    trust_tier: Literal["trusted", "untrusted", "structured-from-untrusted"] = "untrusted"
+    metrics_delta: ToolMetricsDelta = Field(default_factory=ToolMetricsDelta)
+
+
 class ToolMetrics(BaseModel):
     """Per-tool aggregated metrics for one agent invocation.
 

@@ -2,7 +2,7 @@
 
 For each scenario in `evals/scenarios/pod-launch/*.expected.yaml`:
   1. Apply the fixture (kubectl, via `make scenario-apply SCENARIO=<name>`)
-  2. Run the agent (`python -m pod_launch_task --namespace <ns> --pod <name>`)
+  2. Run the agent (`python -m agent_core --quiet pod-launch --namespace <ns> --pod <name>`)
   3. Parse the agent's stdout into a typed `AgentResult`
   4. Apply the `.expected.yaml` spec's structural checks against the result
   5. Clean up (`make scenario-clean SCENARIO=<name>`)
@@ -18,7 +18,7 @@ Usage:
     python evals/run_evals.py --skip-clean      # leave fixture for manual inspection
 
 Invoked via `make eval` from repo root, which runs this through the
-agent-task venv so `pod_launch_task` is importable.
+agent-task venv so `agent_core` and the variant packages are importable.
 
 The .expected.yaml schema this verifier understands (all fields optional):
   target:
@@ -50,7 +50,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
-from pod_launch_task.schemas import AgentResult, Findings
+from agent_core.schemas import AgentResult, Findings
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -425,10 +425,14 @@ class Harness:
         )
 
     def _run_agent(self, namespace: str, pod_name: str) -> AgentResult:
-        """Invokes the agent via `python -m pod_launch_task` in this same
-        Python interpreter (sys.executable). The interpreter has
-        pod_launch_task installed because the agent-task venv is what the
-        Makefile activates for `make eval`.
+        """Invokes the agent via `python -m agent_core pod-launch ...` in
+        the same Python interpreter (sys.executable). The interpreter
+        has the agent-task package installed because the Makefile
+        activates the agent-task venv for `make eval`.
+
+        Note `--quiet` is a top-level flag (owned by `agent_core.cli`),
+        so it appears BEFORE the `pod-launch` subcommand. This is
+        git-style; argparse rejects the reverse order.
 
         Captures stdout (the AgentResult JSON) and parses it via
         Pydantic. stderr (the verbose trajectory) is discarded — the
@@ -438,12 +442,13 @@ class Harness:
             [
                 sys.executable,
                 "-m",
-                "pod_launch_task",
+                "agent_core",
+                "--quiet",
+                "pod-launch",
                 "--namespace",
                 namespace,
                 "--pod",
                 pod_name,
-                "--quiet",
             ],
             check=True,
             capture_output=True,

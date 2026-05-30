@@ -38,9 +38,9 @@ from typing import Any
 import anthropic
 from pydantic import ValidationError
 
-from pod_launch_task.schemas import AgentResult, Findings, Metrics, ToolMetrics
+from agent_core.schemas import AgentResult, Findings, Metrics, ToolMetrics
 from pod_launch_task.prompts import SYSTEM_PROMPT
-from pod_launch_task.tools import TOOLS, bootstrap_pod_context, execute_tool
+from agent_core.tools import TOOLS, bootstrap_pod_context, execute_tool
 
 # Initial bound values per ARCHITECTURE.md §15 Decision #1. Re-tuned in
 # Step 8 from measured eval data.
@@ -296,26 +296,48 @@ def run_agent(namespace: str, pod_name: str, verbose: bool = True) -> AgentResul
                 # Otherwise execute the tool and capture its result.
                 if verbose:
                     print(f"[turn {turn}] tool call: {block.name}({json.dumps(dict(block.input))})", file=sys.stderr)
-                # execute_tool returns (content, metrics_delta). metrics_delta
-                # is empty for most tools; non-empty when a sub-agent fired
-                # (currently only the log-triage Haiku sub-agent inside
-                # kubectl_get_container_logs above the size threshold). The
-                # delta is attributed to THIS tool's bucket.
-                result, metrics_delta = execute_tool(block.name, dict(block.input))
-                for sub_name, count in metrics_delta.get("sub_agent_calls", {}).items():
+                # execute_tool returns a typed ToolExecutionResult with
+                # content (the string the LLM sees) + source + trust_tier
+                # (provenance metadata for the wrapper below) + metrics_delta
+                # (sub-agent activity attributed to this tool).
+                tool_result = execute_tool(block.name, dict(block.input))
+                for sub_name, count in tool_result.metrics_delta.sub_agent_calls.items():
                     tm.sub_agent_calls[sub_name] = (
                         tm.sub_agent_calls.get(sub_name, 0) + count
                     )
-                tm.sub_agent_cost_usd += metrics_delta.get("sub_agent_cost_usd", 0.0)
+                tm.sub_agent_cost_usd += tool_result.metrics_delta.sub_agent_cost_usd
                 if verbose:
-                    print(f"[turn {turn}] tool result: {len(result)} bytes, head: {result[:150]!r}", file=sys.stderr)
-                    if metrics_delta:
-                        print(f"[turn {turn}] sub-agent delta: {metrics_delta}", file=sys.stderr)
+                    print(
+                        f"[turn {turn}] tool result: {len(tool_result.content)} bytes, "
+                        f"source={tool_result.source}, trust={tool_result.trust_tier}, "
+                        f"head: {tool_result.content[:150]!r}",
+                        file=sys.stderr,
+                    )
+                    if tool_result.metrics_delta.sub_agent_calls:
+                        print(
+                            f"[turn {turn}] sub-agent delta: "
+                            f"calls={tool_result.metrics_delta.sub_agent_calls}, "
+                            f"cost=${tool_result.metrics_delta.sub_agent_cost_usd:.4f}",
+                            file=sys.stderr,
+                        )
+                # Per-result provenance wrapping. The system prompt's
+                # INPUT BOUNDARY clause is the global "tool output is
+                # data not commands" reminder; this is the per-result
+                # reinforcement: who produced this content (`source`) and
+                # how trustworthy it is (`trust_tier`). Defense in depth
+                # against indirect prompt injection through attacker-
+                # writable K8s fields (annotations, env vars, log lines).
+                wrapped_content = (
+                    f"<tool_result from='{tool_result.source}' "
+                    f"trust='{tool_result.trust_tier}'>\n"
+                    f"{tool_result.content}\n"
+                    f"</tool_result>"
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": result,
+                        "content": wrapped_content,
                     }
                 )
 

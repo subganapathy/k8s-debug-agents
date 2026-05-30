@@ -56,8 +56,8 @@ from kubernetes.dynamic.exceptions import (
     ResourceNotFoundError,
 )
 
-from pod_launch_task.schemas import Findings
-from pod_launch_task.log_triage import (
+from agent_core.schemas import Findings, ToolExecutionResult
+from agent_core.log_triage import (
     SMALL_LOG_THRESHOLD,
     triage_logs_with_fallback,
 )
@@ -502,35 +502,54 @@ def _selector_matches(selector: dict[str, Any], labels: dict[str, str]) -> bool:
 # ─── Tool execution ────────────────────────────────────────────────────────────
 
 
-def execute_tool(name: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Execute a tool by name and return (result_content, metrics_delta).
+def execute_tool(name: str, args: dict[str, Any]) -> ToolExecutionResult:
+    """Execute a tool by name and return a typed ToolExecutionResult.
 
-    Returns:
-        A tuple of (content, metrics_delta):
+    The result carries four pieces:
+      - `content`: the string the LLM sees as the tool_result. Errors are
+        formatted as strings so the LLM can reason about NotFound /
+        PermissionDenied / etc. like a normal response.
+      - `source`: identifies who produced the content (e.g.,
+        "kubectl_read:Pod", "kubectl_get_container_logs:log_triage",
+        "agent_core" for internal harness messages).
+      - `trust_tier`: `untrusted` for K8s API output (attacker-writable
+        fields like annotations / env vars / labels / log lines),
+        `structured-from-untrusted` for sub-agent outputs that
+        Pydantic-validated untrusted data into a known shape, `trusted`
+        for messages we generated ourselves.
+      - `metrics_delta`: sub-agent activity attributed to this tool.
 
-        - `content`: the tool's output as a string — either JSON, a raw
-          log dump, or an error message. The agent surfaces this back to
-          the LLM as the tool_result content. Errors are formatted as
-          strings so the LLM can reason about NotFound / PermissionDenied
-          / etc. like a normal response.
-        - `metrics_delta`: a dict the parent agent loop merges into its
-          Metrics. Most tools return ({}, content) — only sub-agent-backed
-          tools (currently kubectl_get_container_logs) report non-empty
-          deltas with `sub_agent_calls` and `sub_agent_cost_usd`.
+    The agent loop wraps `content` in a
+    `<tool_result from='{source}' trust='{trust_tier}'>...</tool_result>`
+    block before sending back to Anthropic — per-result provenance on
+    top of the global INPUT BOUNDARY clause in the system prompt.
     """
     if name == "kubectl_read":
-        return (_exec_read(args), {})
+        return ToolExecutionResult(
+            content=_exec_read(args),
+            source=f"kubectl_read:{args.get('kind', '?')}",
+            trust_tier="untrusted",
+        )
     elif name == "kubectl_list":
-        return (_exec_list(args), {})
+        return ToolExecutionResult(
+            content=_exec_list(args),
+            source=f"kubectl_list:{args.get('kind', '?')}",
+            trust_tier="untrusted",
+        )
     elif name == "kubectl_get_container_logs":
-        return _exec_logs(args)  # already returns a tuple
+        return _exec_logs(args)  # already returns ToolExecutionResult
     elif name == "emit_findings":
-        return (
-            "emit_findings is handled by the agent loop and should not be executed as a regular tool",
-            {},
+        return ToolExecutionResult(
+            content="emit_findings is handled by the agent loop and should not be executed as a regular tool",
+            source="agent_core",
+            trust_tier="trusted",
         )
     else:
-        return (f"unknown tool: {name}", {})
+        return ToolExecutionResult(
+            content=f"unknown tool: {name}",
+            source="agent_core",
+            trust_tier="trusted",
+        )
 
 
 def _exec_read(args: dict[str, Any]) -> str:
@@ -710,19 +729,22 @@ def _list_pdbs(args: dict[str, Any], namespace: str) -> str:
     )
 
 
-def _exec_logs(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _exec_logs(args: dict[str, Any]) -> ToolExecutionResult:
     """Fetch container logs; route through the log-triage sub-agent when large.
 
-    Returns (content, metrics_delta).
-      - For raw logs < SMALL_LOG_THRESHOLD (2 KiB), returns the raw bytes
-        and an empty metrics_delta.
-      - For larger logs, invokes `triage_logs_with_fallback` which either:
-        (a) returns a JSON-serialized `LogAnalysis` + non-empty metrics
-            (sub_agent_calls / sub_agent_cost_usd), or
-        (b) on sub-agent failure, returns truncated raw logs with a
-            degradation note + empty metrics.
-      - For empty logs or API errors, returns the error string and an
-        empty metrics_delta.
+    Returns a ToolExecutionResult whose `source` distinguishes between
+    the routing paths:
+      - "kubectl_get_container_logs:error" + trusted: API call failed
+        (NotFound, PermissionDenied, etc.).
+      - "kubectl_get_container_logs:empty" + trusted: container produced
+        no log output (likely never started or already terminated with
+        empty buffers).
+      - "kubectl_get_container_logs:raw" + untrusted: small enough to
+        return raw bytes; parent agent gets attacker-writable pod stdout.
+      - "kubectl_get_container_logs:log_triage" + structured-from-untrusted:
+        large logs; sub-agent fired; LogAnalysis JSON returned.
+      - "kubectl_get_container_logs:fallback" + untrusted: large logs but
+        sub-agent failed; truncated raw + degradation note returned.
     """
     try:
         logs = _core_v1.read_namespaced_pod_log(
@@ -734,17 +756,33 @@ def _exec_logs(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             _request_timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except ApiException as e:
-        return (f"K8s API error reading logs: status={e.status} reason={e.reason}", {})
+        return ToolExecutionResult(
+            content=f"K8s API error reading logs: status={e.status} reason={e.reason}",
+            source="kubectl_get_container_logs:error",
+            trust_tier="trusted",
+        )
     except Exception as e:
-        return (f"K8s API error reading logs: {type(e).__name__}: {e}", {})
+        return ToolExecutionResult(
+            content=f"K8s API error reading logs: {type(e).__name__}: {e}",
+            source="kubectl_get_container_logs:error",
+            trust_tier="trusted",
+        )
 
     if not logs:
-        return ("(no log output)", {})
+        return ToolExecutionResult(
+            content="(no log output)",
+            source="kubectl_get_container_logs:empty",
+            trust_tier="trusted",
+        )
 
     # Below threshold: parent agent sees raw bytes — cheaper and the
     # short output is already context-budget-friendly.
     if len(logs) < SMALL_LOG_THRESHOLD:
-        return (logs, {})
+        return ToolExecutionResult(
+            content=logs,
+            source="kubectl_get_container_logs:raw",
+            trust_tier="untrusted",
+        )
 
     # Above threshold: invoke the log-triage Haiku sub-agent. The
     # fallback wrapper guarantees we always return a string content even
@@ -778,13 +816,13 @@ def bootstrap_pod_context(namespace: str, pod_name: str) -> dict[str, Any]:
         for slow-but-eventually-Ready pods.
       - fetched_at_iso: when this bootstrap ran.
     """
-    # execute_tool returns (content_str, metrics_delta_dict). For the
-    # bootstrap we discard metrics_delta — sub-agents never fire from
-    # kubectl_read; this is purely a context-fetch.
-    pod_text, _ = execute_tool(
+    # execute_tool returns a ToolExecutionResult. Bootstrap only needs the
+    # content; sub-agents never fire from kubectl_read so metrics_delta is
+    # always empty here.
+    pod_text = execute_tool(
         "kubectl_read",
         {"kind": "Pod", "namespace": namespace, "name": pod_name},
-    )
+    ).content
 
     launch_timing: dict[str, Any] | None = None
     try:
