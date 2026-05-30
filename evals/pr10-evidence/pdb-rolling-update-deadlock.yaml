@@ -1,0 +1,127 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: d17c877d
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-d17c877d
+  namespace: eval-pdb-rolling-update-deadlock
+spec:
+  target:
+    namespace: eval-pdb-rolling-update-deadlock
+    podName: app
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify actual CPU consumption of the app container (e.g., via kubectl top pod) once pods are running \u2014 if true\
+      \ usage is well below 7 CPUs, the request should be trimmed substantially."
+    - "Check whether debug-agent-worker3 (taint reserved=topology-test:NoSchedule) is intentionally reserved. If it can be\
+      \ made available, adding a toleration or removing the taint would provide a third schedulable worker, enabling 3\xD7\
+      7-CPU pods to fit."
+    - "Review the rolling update strategy (maxUnavailable=1, maxSurge=1): after fixing the PDB, a future image update would\
+      \ require a 4th pod to exist simultaneously (surge). With 3\xD77 CPU pods already consuming ~21 of 20 available CPUs,\
+      \ a surge pod cannot be scheduled either \u2014 you may need maxSurge=0 with maxUnavailable=1 instead."
+    - Check if there are other namespaces or system pods consuming CPU on debug-agent-worker and debug-agent-worker2 that
+      further reduce available headroom beyond what the node listing shows.
+    confidence: high
+    evidence:
+    - detail: 'FailedScheduling on all 3 pods: ''0/4 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane:
+        }, 1 node(s) had untolerated taint {reserved: topology-test}, 2 Insufficient cpu. preemption: 0/4 nodes are available:
+        2 No preemption victims found for incoming pod, 2 Preemption is not helpful for scheduling.'''
+      kind: k8s_event
+    - detail: "Each app pod requests cpu=7 (limits=7 too). With 10 allocatable CPUs per node, at most 1 pod can fit per node,\
+        \ giving a cluster-wide maximum of 2 app pods \u2014 but 3 are desired."
+      kind: pod_spec
+    - detail: 'Only 2 schedulable worker nodes: debug-agent-worker (10 CPU allocatable, no taints) and debug-agent-worker2
+        (10 CPU allocatable, no taints). debug-agent-worker3 has taint reserved=topology-test:NoSchedule; debug-agent-control-plane
+        has taint node-role.kubernetes.io/control-plane:NoSchedule. Neither taint is tolerated by the app pods.'
+      kind: node_state
+    - detail: "PDB app-pdb: spec.minAvailable=3 with selector app=app. status: currentHealthy=0, desiredHealthy=3, disruptionsAllowed=0,\
+        \ reason=InsufficientPods. With minAvailable equal to total replicas, zero disruptions are ever allowed \u2014 blocking\
+        \ any rolling update eviction."
+      kind: k8s_resource
+    - detail: 'Deployment app: replicas=3, unavailableReplicas=3, all 3 pods (app-59b7fd97f6-cvcp4, app-59b7fd97f6-hpw9x,
+        app-59b7fd97f6-sx56p) are Pending with node=null.'
+      kind: pod_status
+    - detail: "Deployment rolling update strategy: maxUnavailable=1, maxSurge=1. Even with surge capacity, a 4th pod (7 CPU)\
+        \ cannot fit anywhere \u2014 both schedulable workers are fully consumed when 2 pods eventually land."
+      kind: k8s_resource
+    improvements:
+    - category: pdb_configuration
+      roi: high
+      suggestion: Never set PDB minAvailable equal to the Deployment's replica count. A minAvailable of N on a Deployment
+        with N replicas means 0 disruptions are ever permitted, permanently blocking rolling updates, node drains, and cluster
+        upgrades. Use minAvailable = replicas - 1 (or maxUnavailable = 1) as the standard pattern. Consider a linting rule
+        or OPA/Kyverno policy that rejects PDBs where minAvailable >= Deployment replicas.
+    - category: capacity_planning
+      roi: high
+      suggestion: "Enforce a check that sum(pod.requests.cpu \xD7 replicas) \u2264 schedulable node CPU capacity before deploying.\
+        \ For 3 replicas \xD7 7 CPU = 21 CPUs required; cluster only provides 20. Add capacity headroom monitoring (e.g.,\
+        \ alert when sum of pod CPU requests exceeds 80% of total schedulable node capacity) to catch over-subscription before\
+        \ it causes deadlocks."
+    - category: pod_spec
+      roi: medium
+      suggestion: Set CPU requests conservatively based on measured P95 usage (not maximum possible), and use a higher limit
+        for burst. A common pattern is requests = 50-70% of typical usage, limits = 150% of requests. This avoids over-requesting
+        CPUs that the workload doesn't actually consume, leaving headroom for scheduling.
+    - category: monitoring
+      roi: medium
+      suggestion: 'Add a Deployment availability alert: fire when unavailableReplicas > 0 for more than 5 minutes. Also monitor
+        PDB disruptionsAllowed == 0 for extended periods (>15 min outside maintenance windows) as an indicator of a stuck
+        rollout.'
+    problem: "The Deployment `app` in namespace `eval-pdb-rolling-update-deadlock` is permanently deadlocked and cannot launch\
+      \ any pods. The deadlock has two interlocking causes:\n\n1. **CPU over-request vs. node capacity**: Each pod requests\
+      \ 7 CPUs, but the only two schedulable worker nodes (`debug-agent-worker` and `debug-agent-worker2`) each have only\
+      \ 10 allocatable CPUs. This means at most 1 pod can fit per node (7+7=14 > 10), giving the cluster a maximum capacity\
+      \ of 2 app pods across both workers. The Deployment desires 3 replicas \u2014 one more than the cluster can ever accommodate\
+      \ at this pod size.\n\n2. **PDB `app-pdb` enforces `minAvailable: 3`** against a Deployment of only 3 replicas. Because\
+      \ no pods have ever successfully scheduled and become Healthy, `currentHealthy=0` and `disruptionsAllowed=0`. This PDB\
+      \ will block any eviction of existing pods during a rolling update. Combined with the CPU shortage, the cluster cannot\
+      \ free up space on a node to schedule new pods, nor can it evict existing ones \u2014 a complete deadlock even if the\
+      \ CPU issue were partially resolved.\n\nThe net result: all 3 pods are permanently stuck in Pending with `FailedScheduling:\
+      \ 2 Insufficient cpu`, and the Deployment shows `unavailableReplicas: 3` with no path forward."
+    remediations:
+    - action: "Reduce the pod's CPU request so that at least 3 pods can fit across the 2 schedulable workers (20 total CPUs).\
+        \ Set requests.cpu and limits.cpu to \u22643 (3\xD73=9 \u2264 10 per node, so 3 pods can fit on a single node, or\
+        \ spread across both). Example patch:\n\nkubectl patch deployment app -n eval-pdb-rolling-update-deadlock --type=json\
+        \ \\\n  -p '[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/requests/cpu\",\"value\":\"\
+        3\"},{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/resources/limits/cpu\",\"value\":\"3\"}]'\n\n\
+        This is the primary fix \u2014 the cluster simply cannot host 3\xD77-CPU pods."
+      tradeoffs: Reducing CPU limits means each pod has less CPU headroom. Verify the application's actual CPU usage before
+        reducing. If 7 CPUs is a hard runtime requirement, you must instead add more worker nodes or reduce the replica count
+        to 2.
+    - action: "Fix the PDB to allow at least 1 disruption during rolling updates. Change minAvailable from 3 to 2 (or set\
+        \ maxUnavailable=1 instead):\n\nkubectl patch pdb app-pdb -n eval-pdb-rolling-update-deadlock --type=json \\\n  -p\
+        \ '[{\"op\":\"replace\",\"path\":\"/spec/minAvailable\",\"value\":2}]'\n\nThis unblocks rolling updates once the CPU\
+        \ issue is resolved."
+      tradeoffs: "With minAvailable=2, one pod can be disrupted at a time during rollouts. This reduces redundancy momentarily\
+        \ during updates. Setting minAvailable equal to replicas is almost always a misconfiguration \u2014 it permanently\
+        \ prevents any rolling update or node drain from proceeding."
+    - action: "If 7 CPUs per pod is a genuine requirement, add a third schedulable worker node with \u226510 CPU allocatable\
+        \ capacity (no taints). This gives 30 total CPUs across 3 workers, enough for 3\xD77-CPU pods (with 3 CPUs remaining\
+        \ per node for system overhead)."
+      tradeoffs: 'Adding nodes increases infrastructure cost. This is the right approach only if the CPU requirement is genuinely
+        7 cores per instance. Also requires fixing the PDB (remediation #2) independently.'
+  metrics:
+    cache_creation_input_tokens: 8566
+    cache_read_input_tokens: 42345
+    cost_usd: 0.153711
+    input_tokens: 19735
+    model: claude-sonnet-4-6
+    output_tokens: 3312
+    tools:
+      kubectl_list:
+        call_count: 7
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+      kubectl_read:
+        call_count: 1
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 5
+    wall_clock_seconds: 66.39
+  phase: Completed

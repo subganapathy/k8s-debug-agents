@@ -1,0 +1,102 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: 145c3c6f
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-145c3c6f
+  namespace: eval-insufficient-cpu
+spec:
+  target:
+    namespace: eval-insufficient-cpu
+    podName: needs-massive-cpu
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify whether the 100-CPU request was a typo (e.g., '100m' millicores was intended instead of '100' full cores). 100m\
+      \ would be 0.1 CPU \u2014 a reasonable value for a sleep workload."
+    - Check if other namespaces have ResourceQuotas that might also need adjustment if the CPU request is legitimately large.
+    - Review whether debug-agent-worker3 (tainted reserved=topology-test) could be made available by adding the appropriate
+      toleration to the pod, if that node's reservation is compatible with this workload.
+    confidence: high
+    evidence:
+    - detail: 'Pod phase=Pending, PodScheduled condition=False with reason=Unschedulable. The scheduler message explicitly
+        states: ''2 Insufficient cpu'' for the two eligible worker nodes.'
+      kind: pod_status
+    - detail: Container 'app' has resources.requests.cpu=100 and resources.limits.cpu=100 (100 full CPU cores), making this
+        a Guaranteed QoS pod with an enormous request.
+      kind: pod_spec
+    - detail: "All 4 nodes have allocatable.cpu=10. The maximum CPU any single node can offer is 10 cores \u2014 10\xD7 less\
+        \ than the 100-core request."
+      kind: node_state
+    - detail: "debug-agent-control-plane is tainted node-role.kubernetes.io/control-plane:NoSchedule; the pod has no matching\
+        \ toleration \u2014 excluded."
+      kind: node_state
+    - detail: "debug-agent-worker3 is tainted reserved=topology-test:NoSchedule; the pod has no matching toleration \u2014\
+        \ excluded. Only debug-agent-worker and debug-agent-worker2 are schedulable candidates."
+      kind: node_state
+    - detail: "FailedScheduling event from default-scheduler at 2026-05-30T08:25:24Z: 'preemption: 0/4 nodes are available:\
+        \ 4 Preemption is not helpful for scheduling.' \u2014 confirms preemption cannot resolve the shortfall."
+      kind: k8s_event
+    - detail: debug-agent-worker has zero pods running (no existing CPU consumption). debug-agent-worker2 has only 70m CPU
+        requested by running pods. Even with both nodes completely free, neither can satisfy a 100-core request.
+      kind: pod_status
+    improvements:
+    - category: admission_control
+      roi: high
+      suggestion: 'Install a LimitRange in the namespace with a `max` CPU value capped at a realistic per-node ceiling (e.g.,
+        `max.cpu: 8`). This would cause the API server to reject the pod at admission time with a clear error message rather
+        than letting it sit Pending indefinitely.'
+    - category: pod_spec
+      roi: high
+      suggestion: Add CI/CD or pre-deployment linting (e.g., with kyverno or OPA/Gatekeeper) to reject pods whose resource
+        requests exceed a configurable maximum (e.g., `requests.cpu > 8`). A simple policy catches obvious over-requests (100
+        CPUs for a sleep command) before they reach the cluster.
+    - category: monitoring
+      roi: medium
+      suggestion: Alert on pods that remain in Pending/Unschedulable state for more than 5 minutes. A Prometheus alert on
+        `kube_pod_status_unschedulable > 0` for >5m provides rapid signal that a scheduling failure needs attention.
+    problem: "The pod `needs-massive-cpu` is permanently unschedulable because its container requests **100 CPU cores** \u2014\
+      \ far exceeding the allocatable capacity of every node in the cluster. The cluster has 4 nodes, each with only 10 allocatable\
+      \ CPUs: `debug-agent-control-plane` (tainted `node-role.kubernetes.io/control-plane:NoSchedule`) and `debug-agent-worker3`\
+      \ (tainted `reserved=topology-test:NoSchedule`) are both off-limits due to untolerated taints. That leaves only `debug-agent-worker`\
+      \ and `debug-agent-worker2` as eligible schedulable nodes, each with a maximum of 10 CPUs allocatable \u2014 a full\
+      \ 10\xD7 less than the 100 CPU request. Preemption cannot help because no combination of evictions on any node would\
+      \ free enough CPU. The pod will remain Pending indefinitely until its CPU request is reduced to a value that fits within\
+      \ a node's allocatable capacity."
+    remediations:
+    - action: "Reduce the CPU request to a value that fits within a single node's available capacity. With debug-agent-worker\
+        \ fully free (~10 CPUs allocatable) and debug-agent-worker2 consuming ~70m, the safe upper bound is roughly 9.5 CPUs.\
+        \ Example patch:\n\n```bash\nkubectl patch pod needs-massive-cpu -n eval-insufficient-cpu --type=json \\\n  -p='[{\"\
+        op\":\"replace\",\"path\":\"/spec/containers/0/resources/requests/cpu\",\"value\":\"2\"},{\"op\":\"replace\",\"path\"\
+        :\"/spec/containers/0/resources/limits/cpu\",\"value\":\"2\"}]'\n```\n\nOr re-create the pod with an appropriate value\
+        \ (e.g., `cpu: \"2\"` for a `sleep 3600` workload that needs negligible CPU)."
+      tradeoffs: "The pod spec must be edited before the pod is deleted and recreated \u2014 running pods cannot have resource\
+        \ requests patched in-place. Setting a CPU limit that is still too high relative to actual node capacity will keep\
+        \ the pod unschedulable. If the workload genuinely requires >10 CPUs, the cluster must be scaled up with larger nodes\
+        \ before this pod can ever be scheduled."
+    - action: If the workload truly requires more than 10 CPUs, add larger nodes to the cluster (e.g., 32- or 64-core VMs)
+        so the request can be satisfied. Remove the `reserved=topology-test` taint from `debug-agent-worker3` if it is safe
+        to do so, which would restore one more 10-CPU node as a scheduling candidate.
+      tradeoffs: Adding nodes increases infrastructure cost. Removing taints from reserved nodes may disrupt whatever topology-test
+        workloads those nodes are reserved for. This should only be done if the high CPU requirement is genuine and not a
+        misconfiguration.
+  metrics:
+    cache_creation_input_tokens: 3308
+    cache_read_input_tokens: 23505
+    cost_usd: 0.093541
+    input_tokens: 13850
+    model: claude-sonnet-4-6
+    output_tokens: 2169
+    tools:
+      kubectl_list:
+        call_count: 4
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 3
+    wall_clock_seconds: 41.68
+  phase: Completed

@@ -1,0 +1,86 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: c1db2c57
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-c1db2c57
+  namespace: eval-silent-crashloop
+spec:
+  target:
+    namespace: eval-silent-crashloop
+    podName: silent-app
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "If this pod was created by a higher-level controller (Deployment, Job, CronJob), inspect that controller's spec \u2014\
+      \ deleting the pod alone will not fix it as the controller will recreate it with the same bad command."
+    - "Check whether this namespace/scenario is part of a test suite \u2014 the label `eval-scenario: silent-crashloop` suggests\
+      \ it may be intentional test scaffolding rather than a production workload."
+    - Verify that no other pods in the namespace share this pattern by listing pods with `kubectl_list kind=Pod namespace=eval-silent-crashloop`.
+    confidence: high
+    evidence:
+    - detail: "Container `app` command is `[\"sh\", \"-c\", \"exit 1\"]` \u2014 this unconditionally exits with code 1 immediately\
+        \ on every start, with no application logic whatsoever."
+      kind: pod_spec
+    - detail: '`containerStatuses[app].state.waiting.reason = CrashLoopBackOff` with message `back-off 10s restarting failed
+        container=app pod=silent-app_eval-silent-crashloop`.'
+      kind: pod_status
+    - detail: "`lastState.terminated.exitCode=1`, `reason=Error`, `startedAt=2026-05-30T08:29:45`, `finishedAt=2026-05-30T08:29:45`\
+        \ \u2014 the container ran for 0 seconds before exiting."
+      kind: pod_status
+    - detail: '`restartCount=1` after only ~10 seconds of pod lifetime, confirming kubelet is restarting and backing off on
+        each failure.'
+      kind: pod_status
+    - detail: "`Ready=False`, `ContainersReady=False` with reason `ContainersNotReady` \u2014 the pod will never become ready\
+        \ under the current command."
+      kind: pod_status
+    improvements:
+    - category: admission_control
+      roi: medium
+      suggestion: Add a ValidatingAdmissionWebhook or OPA/Gatekeeper policy that rejects pods whose container command is a
+        known no-op or test pattern (e.g., `exit <N>` as the sole command). This prevents accidental deployment of placeholder
+        specs to production namespaces.
+    - category: monitoring
+      roi: high
+      suggestion: Alert on `kube_pod_container_status_restarts_total` increasing more than 2 times within 5 minutes for any
+        pod. CrashLoopBackOff with a silent container produces no log output, so a restart-rate alert is the only reliable
+        signal.
+    - category: pod_spec
+      roi: medium
+      suggestion: Enforce a linting step in CI (e.g., `kube-linter`, `kubeconform`, or a custom script) that flags containers
+        with commands that are clearly placeholders or immediately-exiting patterns (`exit N`, `true`, `false` as the sole
+        command).
+    problem: The container `app` in pod `eval-silent-crashloop/silent-app` is hardcoded to exit immediately with a non-zero
+      status code. Its command is `sh -c 'exit 1'`, which unconditionally exits with code 1 on every start. Because `restartPolicy=OnFailure`,
+      kubelet restarts the container on each failure, producing a CrashLoopBackOff. The container produces no output (hence
+      "silent"), making the failure easy to miss without inspecting the pod spec directly. The pod will never reach a Ready
+      state as long as this command is used.
+    remediations:
+    - action: "Replace the container command with the actual application entrypoint. Remove the hardcoded `exit 1` command\
+        \ from the pod/workload spec:\n\n```yaml\ncontainers:\n- name: app\n  image: busybox:1.36\n  # Remove or replace the\
+        \ command below:\n  # command: [\"sh\", \"-c\", \"exit 1\"]\n  command: [\"sh\", \"-c\", \"<your-real-entrypoint-here>\"\
+        ]\n```\n\nIf this pod is managed by a Deployment/Job, patch the workload spec and roll it out \u2014 do NOT just delete\
+        \ the pod, as it will be recreated with the same bad command."
+      tradeoffs: Straightforward fix with no meaningful tradeoffs. Ensure the replacement command is the correct production
+        entrypoint and is tested in a non-production environment first.
+    - action: 'If this pod is used for a one-shot job that is expected to exit cleanly (code 0), verify the job logic and
+        fix it to exit with code 0 on success. Consider using `restartPolicy: Never` for jobs that should not be restarted
+        on failure, to avoid CrashLoopBackOff accumulating backoff delay.'
+      tradeoffs: 'Using `restartPolicy: Never` means kubelet will not retry on transient failures. Use `OnFailure` only when
+        retries are genuinely desired and the failure is expected to be transient.'
+  metrics:
+    cache_creation_input_tokens: 0
+    cache_read_input_tokens: 7835
+    cost_usd: 0.03328
+    input_tokens: 2615
+    model: claude-sonnet-4-6
+    output_tokens: 1539
+    tools: {}
+    turns_used: 1
+    wall_clock_seconds: 31.2
+  phase: Completed

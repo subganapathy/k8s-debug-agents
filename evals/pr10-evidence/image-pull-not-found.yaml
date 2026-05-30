@@ -1,0 +1,93 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: cb8ca24b
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-cb8ca24b
+  namespace: eval-image-pull-not-found
+spec:
+  target:
+    namespace: eval-image-pull-not-found
+    podName: bad-image-pod
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify whether this pod was created manually or by a controller (Deployment, Job, CronJob). If by a controller, the\
+      \ controller's pod template must be updated \u2014 not just this individual pod."
+    - "Check if 'nonexistent-tag-9999-test' was intended to be a tag in a private registry \u2014 if so, confirm the registry\
+      \ URL is correct in the image reference and that an imagePullSecret is configured."
+    - Run 'docker manifest inspect busybox:<intended-tag>' or check https://hub.docker.com/_/busybox/tags to find the correct
+      tag for the intended busybox version.
+    confidence: high
+    evidence:
+    - detail: 'Container ''app'' is in state waiting with reason=ErrImagePull. The message explicitly states: ''failed to
+        resolve reference "docker.io/library/busybox:nonexistent-tag-9999-test": docker.io/library/busybox:nonexistent-tag-9999-test:
+        not found''.'
+      kind: pod_status
+    - detail: "Container image is set to 'busybox:nonexistent-tag-9999-test' \u2014 the tag 'nonexistent-tag-9999-test' does\
+        \ not exist in the official busybox repository on Docker Hub."
+      kind: pod_spec
+    - detail: 'imagePullPolicy is ''IfNotPresent'': kubelet attempted a pull because the image was not locally cached, and
+        the pull failed with a registry 404.'
+      kind: pod_spec
+    - detail: imageID is empty (''), confirming the image was never successfully pulled or found in the local cache.
+      kind: pod_status
+    - detail: restartPolicy is 'Never', so the pod will not self-recover. It will remain stuck in this state until the spec
+        is corrected.
+      kind: pod_spec
+    improvements:
+    - category: admission_control
+      roi: high
+      suggestion: Deploy a ValidatingAdmissionWebhook (or use a policy engine like OPA/Gatekeeper or Kyverno) that pre-validates
+        image references against a known registry or tag allowlist before the pod is admitted. This catches nonexistent or
+        misspelled tags at deploy time rather than at runtime.
+    - category: pod_spec
+      roi: high
+      suggestion: Enforce image digest pinning (e.g., 'busybox@sha256:...') in production workloads instead of mutable tags.
+        Digests are immutable and will fail fast at CI/CD time if the image doesn't exist, rather than silently deploying
+        a bad tag.
+    - category: monitoring
+      roi: medium
+      suggestion: Add an alert for pods in ErrImagePull or ImagePullBackOff state lasting more than 2 minutes (e.g., kube_pod_container_status_waiting_reason{reason=~'ErrImagePull|ImagePullBackOff'}
+        > 0 for 2m in Prometheus/Alertmanager). This surfaces broken image references quickly.
+    - category: image_optimization
+      roi: high
+      suggestion: Integrate image existence validation into the CI/CD pipeline (e.g., 'docker manifest inspect <image>:<tag>'
+        or 'crane digest <image>:<tag>') as a pre-deploy gate so invalid image references are caught before they reach the
+        cluster.
+    problem: "The pod `bad-image-pod` is stuck in `ErrImagePull` because the container image `busybox:nonexistent-tag-9999-test`\
+      \ does not exist in Docker Hub. The kubelet on node `debug-agent-worker2` attempted to pull `docker.io/library/busybox:nonexistent-tag-9999-test`\
+      \ and received a \"not found\" (HTTP 404) response from the registry. Since the image is not cached locally and the\
+      \ tag is invalid, the container can never start. The pod's `restartPolicy: Never` means it will not retry automatically\
+      \ \u2014 it will remain permanently in this Pending/ErrImagePull state unless corrected."
+    remediations:
+    - action: "Update the container image to a valid, existing busybox tag. For example, patch the pod spec:\n\n  kubectl\
+        \ patch pod bad-image-pod -n eval-image-pull-not-found \\\n    --type='json' \\\n    -p='[{\"op\": \"replace\", \"\
+        path\": \"/spec/containers/0/image\", \"value\": \"busybox:1.36.1\"}]'\n\nOr, if managed by a higher-level object\
+        \ (Deployment, Job, etc.), update the image there. Confirmed valid tags for the official busybox image include: latest,\
+        \ 1.36.1, 1.35, stable."
+      tradeoffs: "Since restartPolicy=Never, the existing pod cannot be restarted in-place after a patch \u2014 Kubernetes\
+        \ will reject spec changes to a running/pending pod's container image for a bare pod. You must delete and recreate\
+        \ the pod with the corrected image. If this pod is owned by a controller, update the controller's template instead."
+    - action: If the intent was to use a private or custom image with tag 'nonexistent-tag-9999-test', ensure the image is
+        built and pushed to the correct registry first, then update the image reference in the pod spec to include the full
+        registry path (e.g., 'myregistry.example.com/busybox:nonexistent-tag-9999-test') and add an appropriate imagePullSecret
+        if the registry is private.
+      tradeoffs: Requires a functioning CI/CD pipeline to build and push the image. Adding imagePullSecrets requires creating
+        the Secret and referencing it in the pod spec (or default ServiceAccount).
+  metrics:
+    cache_creation_input_tokens: 0
+    cache_read_input_tokens: 7835
+    cost_usd: 0.034931
+    input_tokens: 2295
+    model: claude-sonnet-4-6
+    output_tokens: 1713
+    tools: {}
+    turns_used: 1
+    wall_clock_seconds: 33.57
+  phase: Completed
