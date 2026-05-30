@@ -344,10 +344,27 @@ def _load_k8s_config() -> None:
         config.load_kube_config()
 
 
-_load_k8s_config()
-_core_v1 = client.CoreV1Api()
-_api_client = client.ApiClient()
-_dynamic_client = dynamic.DynamicClient(_api_client)
+# Lazy K8s client initialization. We CANNOT eagerly load at import time
+# because the module is imported during `agent --help` (variant registry
+# is built before argparse processes --help), and `--help` must work in
+# environments without kubeconfig — including the Docker build step.
+#
+# First call to any tool initializes the clients; subsequent calls reuse
+# them. Thread-safety not required (single-process agent loop).
+_core_v1: client.CoreV1Api | None = None
+_api_client: client.ApiClient | None = None
+_dynamic_client: dynamic.DynamicClient | None = None
+
+
+def _ensure_clients() -> None:
+    """Initialize K8s clients on first use. Idempotent."""
+    global _core_v1, _api_client, _dynamic_client
+    if _core_v1 is not None:
+        return
+    _load_k8s_config()
+    _core_v1 = client.CoreV1Api()
+    _api_client = client.ApiClient()
+    _dynamic_client = dynamic.DynamicClient(_api_client)
 
 
 # ─── Filter helpers ────────────────────────────────────────────────────────────
@@ -524,6 +541,7 @@ def execute_tool(name: str, args: dict[str, Any]) -> ToolExecutionResult:
     block before sending back to Anthropic — per-result provenance on
     top of the global INPUT BOUNDARY clause in the system prompt.
     """
+    _ensure_clients()
     if name == "kubectl_read":
         return ToolExecutionResult(
             content=_exec_read(args),

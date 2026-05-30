@@ -24,6 +24,11 @@ metadata:
   labels:
     app: smoke-test
     purpose: sidecar-injection-verification
+    # PR-10 Pattern B: sidecar injection is now LABEL-based cluster-wide
+    # opt-in (see design_istio_selective_injection.md). Without this
+    # label, the istio-sidecar-injector webhook's objectSelector won't
+    # match and no sidecar gets injected.
+    sidecar.istio.io/inject: "true"
 spec:
   securityContext:
     runAsNonRoot: true

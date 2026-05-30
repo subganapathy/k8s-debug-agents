@@ -1,0 +1,320 @@
+{{/*
+HandoffRequest CRD — per-invocation diagnostic record.
+
+GENERATED FROM agent_core.schemas.HandoffRequestSpec + HandoffRequestStatus.
+DO NOT EDIT BY HAND. Regenerate with:
+    PYTHONPATH=agent-task/src python scripts/generate_hr_crd.py
+
+One HR represents one diagnostic agent invocation. Created by the CLI
+(today) or the dispatcher controller (PR-16). Owns the Job + per-Job RBAC
+(SA, Role, RoleBinding) so deleting the HR cascades cleanup. The agent
+writes findings + metrics to .status at termination via a subresource
+PATCH. Watchers (CLI / dispatcher) poll/watch .status.phase until
+Completed or Failed.
+
+Lives in the same namespace as the pod being diagnosed (per-target model
+locked by design_istio_selective_injection.md + design memos for PR-10).
+
+Field naming: spec uses camelCase (K8s convention); status carries the
+agent's Findings + Metrics shapes unchanged — those models are also the
+source of truth for emit_findings tool input_schema and AgentResult
+stdout, so JSON output stays byte-compatible across the chain.
+*/}}
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "handoffrequests.k8s-debug-agents.io"
+  },
+  "spec": {
+    "group": "k8s-debug-agents.io",
+    "names": {
+      "categories": [
+        "k8s-debug-agents"
+      ],
+      "kind": "HandoffRequest",
+      "plural": "handoffrequests",
+      "shortNames": [
+        "hr"
+      ],
+      "singular": "handoffrequest"
+    },
+    "scope": "Namespaced",
+    "versions": [
+      {
+        "additionalPrinterColumns": [
+          {
+            "jsonPath": ".spec.variant",
+            "name": "Variant",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".spec.target.podName",
+            "name": "Target",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".status.phase",
+            "name": "Phase",
+            "type": "string"
+          },
+          {
+            "jsonPath": ".metadata.creationTimestamp",
+            "name": "Age",
+            "type": "date"
+          }
+        ],
+        "name": "v1",
+        "schema": {
+          "openAPIV3Schema": {
+            "properties": {
+              "spec": {
+                "description": "User-supplied desired-state for one diagnostic invocation.\n\nImmutable after creation. The agent reads spec.variant + spec.target to\ndecide what to do; the dispatcher controller (PR-16) will populate the\nsame fields when spawning HRs in response to DiagnosisRequest events.",
+                "properties": {
+                  "target": {
+                    "description": "The pod the agent variant is asked to diagnose.",
+                    "properties": {
+                      "namespace": {
+                        "description": "Namespace of the pod under diagnosis.",
+                        "type": "string"
+                      },
+                      "podName": {
+                        "description": "Name of the pod under diagnosis.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "namespace",
+                      "podName"
+                    ],
+                    "type": "object"
+                  },
+                  "variant": {
+                    "description": "Which variant binary to run. Today only 'pod-launch' is implemented; new variants (intra-cluster-traffic, etc.) add themselves to this enum as they land.",
+                    "enum": [
+                      "pod-launch"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "variant",
+                  "target"
+                ],
+                "type": "object"
+              },
+              "status": {
+                "description": "Result-state populated by the variant Job's agent at termination.\n\nWritten via PATCH /status by the agent inside the Job pod (see\n`agent_core.hr_writer`). The CLI/controller watches this subresource\nuntil `phase` becomes Completed or Failed.\n\nAll fields are optional because the status starts empty (phase=Pending)\nand is filled in over the Job's lifetime. The agent never writes\nspec \u2014 Kubernetes' subresource semantics enforce that update on\n/status only touches status.",
+                "properties": {
+                  "findings": {
+                    "description": "Structured Findings \u2014 the single output kind for every agent-task variant.\n\nBoth LLM-driven (pod_launch_task) and deterministic (future\npod_existence_check, metric_query, etc.) variants emit this same shape.",
+                    "properties": {
+                      "alsoCheck": {
+                        "description": "Things the operator should verify next, especially if confidence is low.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "confidence": {
+                        "description": "high: evidence directly supports root cause; medium: reasonable inference from evidence; low: hypothesis only OR runtime evidence beyond this agent's reach.",
+                        "enum": [
+                          "low",
+                          "medium",
+                          "high"
+                        ],
+                        "type": "string"
+                      },
+                      "evidence": {
+                        "description": "Observations supporting the problem statement. Prefer 3-7 entries; avoid padding.",
+                        "items": {
+                          "description": "One observation supporting the problem statement.",
+                          "properties": {
+                            "detail": {
+                              "description": "Specific observation supporting the problem statement.",
+                              "type": "string"
+                            },
+                            "kind": {
+                              "description": "Category of evidence, e.g., k8s_event, pod_status, pod_spec, node_state, k8s_resource.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "detail"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "improvements": {
+                        "description": "Preventive suggestions that would catch this class of issue before it recurs.",
+                        "items": {
+                          "description": "One preventive suggestion that would catch this class of issue.",
+                          "properties": {
+                            "category": {
+                              "description": "Preventive category, e.g., pod_spec, scheduling, image_optimization, admission_control, monitoring, capacity_planning, pdb_configuration.",
+                              "type": "string"
+                            },
+                            "roi": {
+                              "description": "Estimated return-on-investment of implementing this preventive change.",
+                              "enum": [
+                                "low",
+                                "medium",
+                                "high"
+                              ],
+                              "type": "string"
+                            },
+                            "suggestion": {
+                              "description": "Concrete preventive change.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "category",
+                            "suggestion",
+                            "roi"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "problem": {
+                        "description": "One-paragraph natural-language root cause statement.",
+                        "type": "string"
+                      },
+                      "remediations": {
+                        "description": "Ranked list of fixes. First entry should be the most likely fix.",
+                        "items": {
+                          "description": "One ranked fix the operator could apply.",
+                          "properties": {
+                            "action": {
+                              "description": "Concrete change to make \u2014 kubectl command, YAML patch, etc.",
+                              "type": "string"
+                            },
+                            "tradeoffs": {
+                              "description": "What could go wrong, what this trades against, when to prefer alternatives.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "tradeoffs"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "problem",
+                      "confidence",
+                      "evidence",
+                      "remediations",
+                      "improvements",
+                      "alsoCheck"
+                    ],
+                    "type": "object"
+                  },
+                  "metrics": {
+                    "description": "Observability metrics for one agent invocation.\n\nLLM-driven variants populate every field. Deterministic variants\npopulate just `wall_clock_seconds` (+ optionally `termination`); the\nrest stay at their defaults (0 / None / empty dict). Same shape\nend-to-end so the orchestrator (Step 4.5) reads this from\n`HandoffRequest.status.metrics` without conditional handling.\n\nThe parent's `input_tokens` / `output_tokens` / `cost_usd` fields\ncover ONLY the parent's own LLM calls. Tool interactions (including\nsub-agent invocations and their costs) live in `tools`, keyed by\ntool name, so each tool's \"footprint\" is self-contained.",
+                    "properties": {
+                      "cache_creation_input_tokens": {
+                        "default": 0,
+                        "type": "integer"
+                      },
+                      "cache_read_input_tokens": {
+                        "default": 0,
+                        "type": "integer"
+                      },
+                      "cost_usd": {
+                        "default": 0.0,
+                        "type": "number"
+                      },
+                      "input_tokens": {
+                        "default": 0,
+                        "type": "integer"
+                      },
+                      "model": {
+                        "default": null,
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "output_tokens": {
+                        "default": 0,
+                        "type": "integer"
+                      },
+                      "termination": {
+                        "default": null,
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "tools": {
+                        "additionalProperties": {
+                          "description": "Per-tool aggregated metrics for one agent invocation.\n\nOne entry per tool the parent agent actually called. Captures three\nthings per tool:\n  - call_count: how many times this tool was invoked across all turns.\n  - sub_agent_calls: which sub-agents fired during this tool's\n    executions (e.g., {'log_triage': 1} for kubectl_get_container_logs\n    when raw log output exceeded the 2 KiB threshold). Empty for\n    tools that don't delegate to a sub-agent.\n  - sub_agent_cost_usd: aggregate USD cost across the sub-agent\n    invocations attributed to this tool. Zero when no sub-agent\n    fired.\n\nAttribution lives at the parent-tool boundary: a sub-agent fired\ninside `_exec_logs` is rolled up under `kubectl_get_container_logs`,\nnot in a separate top-level field. When more fat tools land (e.g.,\n`consult_runtime_specialist` when node-agent ships in Step 5/7),\nthey add their own ToolMetrics entry \u2014 no top-level Metrics schema\nchange required.",
+                          "properties": {
+                            "call_count": {
+                              "default": 0,
+                              "type": "integer"
+                            },
+                            "sub_agent_calls": {
+                              "additionalProperties": {
+                                "type": "integer"
+                              },
+                              "type": "object"
+                            },
+                            "sub_agent_cost_usd": {
+                              "default": 0.0,
+                              "type": "number"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "description": "Per-tool aggregated metrics. Keyed by tool name. Empty when the agent invoked no tools (e.g., diagnosed entirely from bootstrap state). See ToolMetrics.",
+                        "type": "object"
+                      },
+                      "turns_used": {
+                        "default": null,
+                        "nullable": true,
+                        "type": "integer"
+                      },
+                      "wall_clock_seconds": {
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "wall_clock_seconds"
+                    ],
+                    "type": "object"
+                  },
+                  "phase": {
+                    "default": null,
+                    "description": "Pending: HR created, Job not yet observed. Running: agent has started, no findings yet. Completed: agent emitted findings successfully. Failed: agent terminated abnormally (see metrics.termination).",
+                    "enum": [
+                      "Pending",
+                      "Running",
+                      "Completed",
+                      "Failed"
+                    ],
+                    "nullable": true,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "type": "object"
+          }
+        },
+        "served": true,
+        "storage": true,
+        "subresources": {
+          "status": {}
+        }
+      }
+    ]
+  }
+}

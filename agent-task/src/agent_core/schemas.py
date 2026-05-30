@@ -299,3 +299,85 @@ class LogAnalysis(BaseModel):
             "low: signal is weak or ambiguous."
         ),
     )
+
+
+# ─── HandoffRequest CRD schemas (PR-10) ───────────────────────────────────────
+#
+# HandoffRequest is the per-invocation K8s custom resource that anchors one
+# diagnostic run. It is created by either the CLI (today) or the dispatcher
+# controller (PR-16) and is the owner of all per-invocation resources (Job,
+# SA, Role, RoleBinding). The agent writes findings + metrics to
+# HandoffRequest.status at termination; the creator watches the status
+# subresource for completion.
+#
+# These Pydantic models are the single source of truth for the CRD's
+# openAPIV3Schema — `scripts/generate_hr_crd.py` calls
+# `HandoffRequestSpec.model_json_schema()` and embeds the result in the
+# chart template. Renaming a field here automatically updates the CRD.
+
+
+class HandoffRequestTarget(BaseModel):
+    """The pod the agent variant is asked to diagnose."""
+
+    namespace: str = Field(description="Namespace of the pod under diagnosis.")
+    podName: str = Field(description="Name of the pod under diagnosis.")
+
+
+class HandoffRequestSpec(BaseModel):
+    """User-supplied desired-state for one diagnostic invocation.
+
+    Immutable after creation. The agent reads spec.variant + spec.target to
+    decide what to do; the dispatcher controller (PR-16) will populate the
+    same fields when spawning HRs in response to DiagnosisRequest events.
+    """
+
+    variant: Literal["pod-launch"] = Field(
+        description=(
+            "Which variant binary to run. Today only 'pod-launch' is "
+            "implemented; new variants (intra-cluster-traffic, etc.) add "
+            "themselves to this enum as they land."
+        ),
+    )
+    target: HandoffRequestTarget = Field(
+        description="The pod the variant is asked to diagnose."
+    )
+
+
+class HandoffRequestStatus(BaseModel):
+    """Result-state populated by the variant Job's agent at termination.
+
+    Written via PATCH /status by the agent inside the Job pod (see
+    `agent_core.hr_writer`). The CLI/controller watches this subresource
+    until `phase` becomes Completed or Failed.
+
+    All fields are optional because the status starts empty (phase=Pending)
+    and is filled in over the Job's lifetime. The agent never writes
+    spec — Kubernetes' subresource semantics enforce that update on
+    /status only touches status.
+    """
+
+    phase: Literal["Pending", "Running", "Completed", "Failed"] | None = Field(
+        default=None,
+        description=(
+            "Pending: HR created, Job not yet observed. "
+            "Running: agent has started, no findings yet. "
+            "Completed: agent emitted findings successfully. "
+            "Failed: agent terminated abnormally (see metrics.termination)."
+        ),
+    )
+    findings: Findings | None = Field(
+        default=None,
+        description=(
+            "The variant's structured root-cause document. Populated when "
+            "phase=Completed. May be present-but-low-confidence on Failed "
+            "if the agent salvaged any reasoning before terminating."
+        ),
+    )
+    metrics: Metrics | None = Field(
+        default=None,
+        description=(
+            "Observability for this invocation (turns, cost, wall-clock, "
+            "per-tool footprints, termination cause). Always populated when "
+            "phase is Completed or Failed, even if findings is None."
+        ),
+    )

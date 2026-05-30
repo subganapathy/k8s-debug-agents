@@ -26,10 +26,14 @@ apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
   name: anthropic-api-port-rewrite
-  namespace: {{ .Values.tasksNamespace.name }}
+  # PR-10: moved to istio-system + exportTo: ["*"]. Same rationale —
+  # sidecars in any namespace need this VS in their route config.
+  namespace: {{ .Values.istioMesh.namespace }}
   labels:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
 spec:
+  exportTo:
+    - "*"
   hosts:
     - api.anthropic.com
   http:

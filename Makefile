@@ -33,6 +33,7 @@ ISTIO_REPO_URL     := https://istio-release.storage.googleapis.com/charts
 REGISTRY           ?=
 IMAGE_TAG          ?= 0.1.0
 CREDENTIAL_AUTHZ_IMAGE := k8s-debug-agents/credential-authz:$(IMAGE_TAG)
+AGENT_TASK_IMAGE       := k8s-debug-agents/agent-task:$(IMAGE_TAG)
 
 # ─── Help ──────────────────────────────────────────────────────────────────────
 .PHONY: help
@@ -153,6 +154,21 @@ istio-upgrade: ## Upgrade Istio — requires VERSION=x.y.z. Uses SSA on new CRDs
 	  --set pilot.cni.enabled=true \
 	  --wait
 
+.PHONY: istio-patch-injector
+istio-patch-injector: ## Apply Pattern B Istio injection: cluster-wide opt-in via per-Pod label. Required for per-target agent Jobs.
+	@echo ">> Patching MutatingWebhookConfiguration istio-sidecar-injector for cluster-wide pod opt-in"
+	@echo ">> (replaces namespaceSelector + adds objectSelector matching sidecar.istio.io/inject=true)"
+	@echo ">> See design_istio_selective_injection.md for rationale (Pattern B vs A/C/D)."
+	@echo ">> NOTE: This patch is OVERWRITTEN by 'helm upgrade istiod'. Re-run this target after any istio-* helm operation."
+	@for webhook in $$(kubectl get mutatingwebhookconfiguration -l app=sidecar-injector -o name 2>/dev/null); do \
+	  echo ">> Patching $$webhook"; \
+	  kubectl patch $$webhook --type=json -p='[ \
+	    {"op":"replace","path":"/webhooks/0/namespaceSelector","value":{"matchExpressions":[{"key":"istio-injection","operator":"NotIn","values":["disabled"]},{"key":"kubernetes.io/metadata.name","operator":"NotIn","values":["kube-system","kube-public","kube-node-lease","istio-system"]}]}}, \
+	    {"op":"replace","path":"/webhooks/0/objectSelector","value":{"matchLabels":{"sidecar.istio.io/inject":"true"}}} \
+	  ]' || true; \
+	done
+	@echo ">> Patched. Pods labeled sidecar.istio.io/inject=true will now get sidecars in any namespace."
+
 .PHONY: istio-uninstall
 istio-uninstall: ## Uninstall Istio (istiod first, then istio-cni, then istio-base — reverse install order)
 	@echo ">> Uninstalling istiod"
@@ -170,11 +186,13 @@ VALUES_FILE ?= $(CHART_DIR)/values-kind.yaml
 .PHONY: app-install
 app-install: ## Install k8s-debug-agents chart — override VALUES_FILE for prod
 	@echo ">> Installing k8s-debug-agents (values: $(VALUES_FILE))"
-	@echo ">> Helm release lives in $(PLATFORM_NAMESPACE); chart also creates $(TASKS_NAMESPACE) for runtime workloads"
+	@echo ">> Helm release lives in $(PLATFORM_NAMESPACE); variant Jobs run per-target via the dispatcher / CLI"
 	helm upgrade --install k8s-debug-agents $(CHART_DIR) \
 	  -f $(VALUES_FILE) \
 	  --namespace $(PLATFORM_NAMESPACE) --create-namespace \
 	  --wait
+	@echo ">> Applying Pattern B Istio injection patch (cluster-wide opt-in)"
+	@$(MAKE) --no-print-directory istio-patch-injector
 
 .PHONY: app-upgrade
 app-upgrade: ## Upgrade k8s-debug-agents chart — override VALUES_FILE for prod
@@ -193,7 +211,7 @@ app-uninstall: ## Uninstall k8s-debug-agents chart
 # ─── Image build (Kind dev loop) ───────────────────────────────────────────────
 
 .PHONY: build-images
-build-images: build-credential-authz-image ## Build all component images and load into Kind
+build-images: build-credential-authz-image build-agent-task-image ## Build all component images and load into Kind
 
 .PHONY: build-credential-authz-image
 build-credential-authz-image: ## Build credential-authz image and kind-load into the dev cluster
@@ -204,6 +222,18 @@ build-credential-authz-image: ## Build credential-authz image and kind-load into
 	  .
 	@echo ">> Loading $(CREDENTIAL_AUTHZ_IMAGE) into Kind cluster $(CLUSTER_NAME)"
 	kind load docker-image $(CREDENTIAL_AUTHZ_IMAGE) --name $(CLUSTER_NAME)
+
+.PHONY: build-agent-task-image
+build-agent-task-image: ## Build agent-task image and kind-load into the dev cluster
+	@echo ">> Building $(AGENT_TASK_IMAGE)"
+	docker build \
+	  --file docker/agent-task/Dockerfile \
+	  --tag $(AGENT_TASK_IMAGE) \
+	  --tag agent-task:dev \
+	  .
+	@echo ">> Loading $(AGENT_TASK_IMAGE) into Kind cluster $(CLUSTER_NAME)"
+	kind load docker-image $(AGENT_TASK_IMAGE) --name $(CLUSTER_NAME)
+	kind load docker-image agent-task:dev --name $(CLUSTER_NAME)
 
 # ─── Step 2 verification ───────────────────────────────────────────────────────
 
@@ -279,6 +309,13 @@ scenario-clean: ## Clean up a scenario fixture. Usage: make scenario-clean SCENA
 scenario-list: ## List available scenario fixtures
 	@echo "Available scenarios in $(SCENARIO_DIR):"
 	@ls -1 $(SCENARIO_DIR)/*.yaml 2>/dev/null | grep -v '.expected.yaml' | sed 's|$(SCENARIO_DIR)/||; s|\.yaml$$||; s|^|  |'
+
+.PHONY: eval-cleanup
+eval-cleanup: ## Belt-and-suspenders cleanup: delete orphaned per-Job ClusterRoleBindings + HRs from past eval runs
+	@echo ">> Deleting orphaned ClusterRoleBindings labeled agent-task/created-by"
+	-kubectl delete clusterrolebinding -l agent-task/created-by --ignore-not-found
+	@echo ">> Deleting HandoffRequests labeled agent-task/created-by"
+	-kubectl delete handoffrequests --all-namespaces -l agent-task/created-by --ignore-not-found
 
 .PHONY: verify
 verify: security-scan eval ## Pre-PR + pre-merge gate: gitleaks secret scan + 9-scenario eval. Run BOTH (a) before opening the PR AND (b) again before merging — the second run catches any drift between open and merge.

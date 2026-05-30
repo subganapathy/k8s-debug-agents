@@ -52,6 +52,9 @@ metadata:
     app.kubernetes.io/part-of: k8s-debug-agents
     app.kubernetes.io/name: k8s-debug-agents
     purpose: credential-flow-verification
+    # PR-10 Pattern B: sidecar injection is now LABEL-based cluster-wide
+    # opt-in (see design_istio_selective_injection.md).
+    sidecar.istio.io/inject: "true"
 spec:
   serviceAccountName: credential-flow-test
   restartPolicy: Never

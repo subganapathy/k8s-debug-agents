@@ -28,11 +28,13 @@ The peer's identity comes from its mTLS client certificate (provisioned
 by istiod). Format:
   spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount-name>
 
-Step 3 scope: allow ANY pod in agent-tasks namespace to call (not yet
-filtered by SA name pattern). This is intentional — Step 4 (dispatcher)
-will create per-task ServiceAccounts named like agent-task-<id>, and at
-that point we can tighten this to a wildcard match like
-`agent-task-*`. For now, namespace-level matching is sufficient.
+PR-10 scope: tightened to match per-Job SA pattern. Agent variant Jobs
+get per-invocation SAs named `agent-job-<uid>` (created programmatically
+by agent_core.rbac_provisioner). Their SPIFFE identity matches the
+wildcard pattern below.
+
+We also keep the existing Step-3 test pod allowance (credential-flow-test
+SA in any namespace) for the credential-flow end-to-end check.
 
 A separate DENY policy isn't needed: AuthorizationPolicy is allow-list
 by default. Without a matching ALLOW rule, traffic is denied.
@@ -50,10 +52,24 @@ spec:
       app.kubernetes.io/component: credential-authz
   action: ALLOW
   rules:
+    # Rule 1: per-invocation agent Job SAs (agent-job-<uid>) in any
+    # namespace. PR-10's per-target Job model puts variant Jobs in the
+    # target pod's namespace; SA names follow the dispatcher's
+    # naming convention (Kyverno-enforced in PR-16).
     - from:
         - source:
-            namespaces:
-              - {{ .Values.tasksNamespace.name | quote }}
+            principals:
+              - "cluster.local/ns/*/sa/agent-job-*"
+      to:
+        - operation:
+            ports:
+              - {{ .Values.credentialAuthz.port | quote }}
+    # Rule 2: the credential-flow Step-3 verification pod. Keeps
+    # `make test-credential-flow` working through chart upgrades.
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/*/sa/credential-flow-test"
       to:
         - operation:
             ports:

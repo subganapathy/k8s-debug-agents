@@ -1,0 +1,77 @@
+{{/*
+ClusterRoles installed by Helm as policy definitions; the BINDINGS are
+created programmatically per-invocation by agent_core.rbac_provisioner.
+
+This split is intentional:
+  - Policy (what permissions can exist) is platform-managed, version-
+    controlled YAML reviewable by the platform team.
+  - Bindings (who actually has those permissions, where) are per-
+    invocation, scoped to one Job, owned by the Job for cascade cleanup.
+
+See design memos: design_namespace_topology.md (per-target Jobs) and
+design_kyverno_pr16_scope.md (Kyverno enforces that the Roles created
+by the dispatcher exactly mirror agent-task-reader's rules — Tier 1
+content validation lands in PR-16).
+*/}}
+
+---
+# agent-task-reader: the namespace-scoped read surface the agent's tools
+# need. Per-invocation Roles created by rbac_provisioner mirror these
+# rules exactly (the dispatcher controller in PR-16 will be Kyverno-
+# constrained to do the same).
+#
+# Kinds match exactly the kinds permitted by:
+#   agent_core.tools.kubectl_read.{Kind enum}
+#   agent_core.tools.kubectl_list.{Kind enum}
+#   agent_core.tools.kubectl_get_container_logs (pods/log)
+#
+# When the tool surface grows (e.g., PR-14 adds NetworkPolicy reads for
+# intra_cluster_traffic_task), this ClusterRole adds those resources +
+# rbac_provisioner.AGENT_TASK_READER_RULES grows in lockstep.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-task-reader
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - events
+      - services
+      - configmaps
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+      - pods/log
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]
+
+---
+# agent-node-reader: the narrow Node-read fallback. Node is cluster-scoped
+# so it can't be expressed in a namespace-scoped Role; we grant it via a
+# per-invocation ClusterRoleBinding to this ClusterRole. Cleanup of those
+# CRBs is explicit (cluster-scoped resources can't be owner-ref'd to
+# namespaced Jobs).
+#
+# Kept maximally narrow: only Node get/list. The agent uses this for
+# taint-toleration diagnoses (`kubectl_list kind=Node`) and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-node-reader
+  labels:
+    {{- include "k8s-debug-agents.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]

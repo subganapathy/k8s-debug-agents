@@ -6,23 +6,26 @@
 
 # ─── Namespaces + Istio integration ────────────────────────────────────────────
 #
-# The chart manages two namespaces with identical security posture but
-# distinct operational roles:
+# The chart manages ONE namespace + one already-existing namespace:
 #
-#   agent-platform — long-running infrastructure (credential-authz, dispatcher,
-#                    token-tracker). Helm's --namespace flag should target this.
-#   agent-tasks    — ephemeral Job pods (agent-task variants). Created at
-#                    runtime by the dispatcher when alerts fire; the chart
-#                    itself only manages the namespace label + the Istio
-#                    resources that govern outbound traffic from these pods.
+#   agent-platform — long-running infrastructure (credential-authz,
+#                    dispatcher, token-tracker). Helm's --namespace flag
+#                    should target this.
+#   istio-system   — pre-existing (from `make istio-install`). The chart
+#                    installs cluster-wide Istio resources (EnvoyFilter,
+#                    DestinationRule, VirtualService, ServiceEntry for the
+#                    agent-task egress to api.anthropic.com) INTO this
+#                    namespace so they apply globally via workload selectors.
 #
-# Both namespaces:
-#   - Get Istio sidecar injection (via the istio-injection: enabled label)
-#   - Enforce PSA `restricted` (relies on istio-cni being installed; see PR #4)
-#   - Are cluster-local (no cross-cluster federation in this design)
+# PR-10 removed the formerly-managed `agent-tasks` namespace. Variant
+# Jobs now run in the target pod's namespace (per-target Job model);
+# per-Job SA + Role + RoleBinding are created programmatically by
+# agent_core.rbac_provisioner. See design_istio_selective_injection.md +
+# design_namespace_topology.md.
 #
-# The split is operational/policy-clarity, NOT differential security policy.
-# See design_namespace_topology.md in memory for the full rationale.
+# agent-platform:
+#   - Gets Istio sidecar injection (via the istio-injection: enabled label)
+#   - Enforces PSA `restricted` (relies on istio-cni being installed; see PR #4)
 
 # ─── Pod Security Admission — see https://kubernetes.io/docs/concepts/security/pod-security-standards/
 #
@@ -56,9 +59,20 @@ platformNamespace:
     auditVersion:   latest
     warnVersion:    latest
 
+# Istio mesh resources install into this namespace (already created by
+# `make istio-install`; we don't manage its labels). Holds the cluster-
+# wide EnvoyFilter / DestinationRule / VirtualService / ServiceEntry
+# that govern egress from any pod labeled `app.kubernetes.io/component:
+# agent-task` to api.anthropic.com via credential-authz.
+istioMesh:
+  namespace: istio-system
+
+# Host namespace for the Step-1 smoke-test pod + Step-3 credential-flow
+# verification pod. Variant agent Jobs do NOT run here after PR-10 (they
+# run in the target pod's namespace per the per-target model). This
+# namespace stays only for the dedicated test fixtures.
 tasksNamespace:
   name: agent-tasks
-  istioInjection: true
   podSecurity:
     enforce:        restricted
     audit:          restricted

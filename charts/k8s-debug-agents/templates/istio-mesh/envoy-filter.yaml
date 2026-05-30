@@ -74,10 +74,19 @@ apiVersion: networking.istio.io/v1alpha3
 kind: EnvoyFilter
 metadata:
   name: anthropic-credential-injection
-  namespace: {{ .Values.tasksNamespace.name }}
+  # PR-10: moved from agent-tasks to istio-system. EnvoyFilter resources
+  # in istio-system are interpreted CLUSTER-WIDE: the workloadSelector
+  # below now matches agent-task pods regardless of which target namespace
+  # they run in (per-target Job model). See design_istio_selective_injection.md.
+  namespace: {{ .Values.istioMesh.namespace }}
   labels:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
 spec:
+  # workloadSelector targets every pod with `app.kubernetes.io/component:
+  # agent-task` label, in any namespace. Both the variant Job pods
+  # (created programmatically by agent_core.job_runner) and the Step-3
+  # credential-flow test pod set this label, so both participate in the
+  # ext_authz substitution.
   workloadSelector:
     labels:
       app.kubernetes.io/component: agent-task

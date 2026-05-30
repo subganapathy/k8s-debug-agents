@@ -60,10 +60,11 @@ AGENT_DIR = REPO_ROOT / "agent-task"
 
 CONFIDENCE_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
-# How long to allow the agent to run before we give up. Most scenarios
-# finish in 30-90s; latency-lens scenarios may push higher because the
-# fixture itself takes ~50s to reach Ready. 5 min is generous.
-AGENT_TIMEOUT_SECONDS = 300
+# How long to allow the agent to run before we give up. PR-10 added
+# Job spawn + Pod startup (~10-20s) on top of the agent's own runtime,
+# so scenarios that previously took ~60s now take ~80s. 6 min is the
+# new generous cap.
+AGENT_TIMEOUT_SECONDS = 360
 
 # How long to wait for a `make scenario-apply` to reach a stuck state.
 # The Makefile itself caps at 120s; this gives a small buffer.
@@ -426,17 +427,23 @@ class Harness:
 
     def _run_agent(self, namespace: str, pod_name: str) -> AgentResult:
         """Invokes the agent via `python -m agent_core pod-launch ...` in
-        the same Python interpreter (sys.executable). The interpreter
-        has the agent-task package installed because the Makefile
-        activates the agent-task venv for `make eval`.
+        the same Python interpreter (sys.executable). PR-10 changed the
+        semantics of that CLI: instead of running the agent loop locally,
+        it now SPAWNS a K8s Job in the target namespace, watches the
+        resulting HandoffRequest CR's status subresource, and prints
+        the findings JSON. The harness sees the same AgentResult JSON
+        on stdout — the change is invisible at this layer.
 
-        Note `--quiet` is a top-level flag (owned by `agent_core.cli`),
-        so it appears BEFORE the `pod-launch` subcommand. This is
-        git-style; argparse rejects the reverse order.
+        Prerequisites the eval harness now depends on:
+          - Kind cluster reachable via active kubectl context
+          - agent-task:dev image loaded into Kind (`make image-load`)
+          - Chart installed with HandoffRequest CRD + ClusterRoles
+            (`make app-install`)
+          - Istio sidecar-injector patched for Pattern B
+            (`make istio-patch-injector`, also auto-run by `make app-install`)
 
         Captures stdout (the AgentResult JSON) and parses it via
-        Pydantic. stderr (the verbose trajectory) is discarded — the
-        harness only cares about the structured result.
+        Pydantic. stderr (the verbose trajectory) is discarded.
         """
         completed = subprocess.run(
             [
