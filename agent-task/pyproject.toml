@@ -34,8 +34,10 @@ dependencies = [
 ]
 
 [project.scripts]
-# One CLI per variant. Add a new line here when adding a new variant.
-pod-launch-task = "pod_launch_task.main:main"
+# Single git-style entry: `agent <variant> ...`. Variants are registered
+# as subcommands in `agent_core.cli._register_variants` — adding a new
+# variant means one import + one call there, not a new line here.
+agent = "agent_core.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

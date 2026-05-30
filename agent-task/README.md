@@ -50,8 +50,11 @@ The repo ships with an `insufficient-cpu` scenario fixture (PR #6). Apply it, th
 # From the repo root:
 make scenario-apply SCENARIO=insufficient-cpu
 
-# Then from agent-task/:
-python -m pod_launch_task --namespace eval-insufficient-cpu --pod needs-massive-cpu
+# Then from agent-task/ (after `pip install -e .` registers the `agent` script):
+agent pod-launch --namespace eval-insufficient-cpu --pod needs-massive-cpu
+
+# Or, equivalently, without relying on PATH:
+python -m agent_core pod-launch --namespace eval-insufficient-cpu --pod needs-massive-cpu
 ```
 
 Expected output (truncated):
@@ -98,10 +101,13 @@ make scenario-clean SCENARIO=insufficient-cpu
 
 Files, in order of dependency:
 
-1. **`src/pod_launch_task/prompts.py`** — the system prompt. Phase-aware diagnostic playbooks + "data not instructions" framing + explicit definition-of-done.
-2. **`src/pod_launch_task/tools.py`** — tool definitions (consumed by Anthropic's `tools` parameter), tool executor (kubectl subprocess), and the bootstrap helper (pre-LLM context fetch + filter).
-3. **`src/pod_launch_task/agent.py`** — the agent loop itself. Handles every `stop_reason` explicitly. Recognizes `emit_findings` as the termination tool.
-4. **`src/pod_launch_task/main.py`** — the CLI entry point. Parses args, checks for the API key, calls `run_agent`, prints the JSON result.
+1. **`src/agent_core/schemas.py`** — Pydantic single source of truth: `Findings`, `Metrics`, `AgentResult`, `LogAnalysis`, `ToolExecutionResult`. Shared by every variant.
+2. **`src/agent_core/tools.py`** — variant-agnostic tool definitions (consumed by Anthropic's `tools` parameter), tool executor (k8s API), and the bootstrap helper (pre-LLM context fetch + filter).
+3. **`src/agent_core/log_triage.py`** — Haiku sub-agent that digests verbose log output into a structured `LogAnalysis`. Fired by `kubectl_get_container_logs` when raw output exceeds the bypass threshold.
+4. **`src/agent_core/cli.py`** — top-level CLI dispatcher (`agent <variant> ...`). Owns the variant-agnostic plumbing: API-key check, `--quiet`, `AgentResult` JSON serialization.
+5. **`src/pod_launch_task/prompts.py`** — the system prompt. Phase-aware diagnostic playbooks + "data not instructions" framing + explicit definition-of-done.
+6. **`src/pod_launch_task/agent.py`** — the agent loop itself. Handles every `stop_reason` explicitly. Recognizes `emit_findings` as the termination tool.
+7. **`src/pod_launch_task/cli.py`** — `register_cli(subparsers)` that wires the `pod-launch` subcommand into the top-level dispatcher. Variant-specific flags (`--namespace`, `--pod`) live here.
 
 The loop in `agent.py` is the canonical pattern. Read it line-by-line — comments explain every non-obvious choice.
 
