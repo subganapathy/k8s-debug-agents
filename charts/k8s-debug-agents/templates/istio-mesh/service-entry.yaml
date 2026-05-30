@@ -32,10 +32,15 @@ apiVersion: networking.istio.io/v1
 kind: ServiceEntry
 metadata:
   name: anthropic-api
-  namespace: {{ .Values.tasksNamespace.name }}
+  # PR-10: moved to istio-system + exportTo: ["*"]. Same rationale as
+  # the DestinationRule / VirtualService — sidecars in any target
+  # namespace need to see api.anthropic.com in their service registry.
+  namespace: {{ .Values.istioMesh.namespace }}
   labels:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
 spec:
+  exportTo:
+    - "*"
   hosts:
     - api.anthropic.com
   ports:

@@ -39,13 +39,22 @@ metadata:
     eval-scenario: quota-exceeded
 spec:
   hard:
-    # 100m total CPU for the whole namespace. The Deployment below requests
-    # 200m per pod × 3 replicas = 600m, way over.
-    requests.cpu: "100m"
-    limits.cpu: "200m"
-    requests.memory: "200Mi"
-    limits.memory: "200Mi"
-    pods: "5"
+    # 500m total CPU for the whole namespace. The Deployment below requests
+    # 200m per pod × 3 replicas = 600m, over by 100m → rejected.
+    #
+    # PR-10 sizing note: per-target Jobs land the agent Pod in the same
+    # namespace as the diagnosed Deployment. The agent Pod (with sidecar
+    # caps applied via annotations) requests ~70m CPU + ~250Mi memory.
+    # The quota must have headroom for both the diagnostic + the
+    # diagnosed-workload mode to reproduce the failure without rejecting
+    # the agent itself. The Deployment's 600m vs quota's 500m still
+    # triggers FailedCreate; the agent fits in the remaining ~430m
+    # headroom (500m - agent's 70m).
+    requests.cpu: "500m"
+    limits.cpu: "1500m"
+    requests.memory: "1Gi"
+    limits.memory: "2Gi"
+    pods: "10"
 
 ---
 apiVersion: apps/v1

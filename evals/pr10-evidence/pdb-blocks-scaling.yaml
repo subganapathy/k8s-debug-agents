@@ -1,0 +1,126 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: bd2cd46f
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-bd2cd46f
+  namespace: eval-pdb-blocks-scaling
+spec:
+  target:
+    namespace: eval-pdb-blocks-scaling
+    podName: another-app
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify whether `another-app`'s 6-CPU request reflects actual usage (`kubectl top pod another-app -n eval-pdb-blocks-scaling`)\
+      \ \u2014 if it's a test pod running `sleep 3600`, the request is almost certainly over-provisioned."
+    - Check the `hog` Deployment's desired replica count (`kubectl get deployment -n eval-pdb-blocks-scaling`) to confirm
+      whether 2 replicas is correct or if the PDB's minAvailable=2 was set without accounting for the resource footprint.
+    - Inspect all pods cluster-wide on `debug-agent-worker` and `debug-agent-worker2` (not just this namespace) to get a complete
+      picture of total CPU allocation across both nodes.
+    - "Check if there is a HorizontalPodAutoscaler targeting the `hog` Deployment \u2014 if so, the HPA may keep trying to\
+      \ scale up replicas into an already-deadlocked state, generating a storm of FailedScheduling events."
+    confidence: high
+    evidence:
+    - detail: 'Pod `hog-96c7cb576-l24lf` (hog Deployment, replica 2/2) is in phase=Pending with no node assigned; FailedScheduling
+        event reads: ''0/4 nodes are available: 1 node(s) had untolerated taint {node-role.kubernetes.io/control-plane: },
+        1 node(s) had untolerated taint {reserved: topology-test}, 2 Insufficient cpu. preemption: not eligible due to preemptionPolicy=Never.'''
+      kind: pod_status
+    - detail: 'PDB `hog-pdb`: spec.minAvailable=2, status.currentHealthy=1, status.desiredHealthy=2, status.disruptionsAllowed=0,
+        condition DisruptionAllowed=False (reason: InsufficientPods). Zero evictions are permitted.'
+      kind: k8s_resource
+    - detail: "`debug-agent-worker` has 10 allocatable CPUs; occupied by `another-app` (6 CPU request) + agent pod (0.07 CPU)\
+        \ = ~6.07 CPUs used, leaving ~3.93 free \u2014 insufficient for the hog pod's 7 CPU request."
+      kind: node_state
+    - detail: "`debug-agent-worker2` has 10 allocatable CPUs; occupied by `hog-96c7cb576-b6wzd` (7 CPU request) = 7 CPUs used,\
+        \ leaving ~3 free \u2014 insufficient for the hog pod's 7 CPU request."
+      kind: node_state
+    - detail: '`debug-agent-control-plane` has taint `node-role.kubernetes.io/control-plane:NoSchedule`; `debug-agent-worker3`
+        has taint `reserved=topology-test:NoSchedule`. Neither hog pod has tolerations for these taints, so both nodes are
+        effectively unavailable.'
+      kind: node_state
+    - detail: "`another-app` has `resources.requests.cpu: 6` \u2014 an oversized request that consumes 60% of `debug-agent-worker`'s\
+        \ CPU budget by itself, directly causing the Insufficient CPU condition on that node."
+      kind: pod_spec
+    - detail: 'The pending hog pod has `preemptionPolicy: Never`, preventing it from preempting lower-priority pods that could
+        free CPU, making the deadlock permanent without manual intervention.'
+      kind: pod_spec
+    improvements:
+    - category: pod_spec
+      roi: high
+      suggestion: 'Enforce resource request right-sizing via a LimitRange in the namespace (e.g., `max.cpu: 4` per container)
+        to prevent individual pods from monopolizing a node''s CPU budget and causing scheduling deadlocks.'
+    - category: pdb_configuration
+      roi: high
+      suggestion: "When setting `minAvailable` on a PDB, ensure the cluster has enough spare capacity to host `desiredReplicas\
+        \ - minAvailable` additional pods at the same resource footprint. Here, minAvailable=2 with a 7-CPU request requires\
+        \ at least 14 CPUs of free schedulable capacity \u2014 document and enforce this as a pre-deployment capacity check."
+    - category: capacity_planning
+      roi: high
+      suggestion: Add cluster autoscaler (or Karpenter) with a node template that matches the `hog` workload's resource profile.
+        When the second replica fails to schedule, the autoscaler would provision a new node automatically, breaking the deadlock
+        without manual intervention.
+    - category: monitoring
+      roi: medium
+      suggestion: "Alert on `kube_pod_status_phase{phase='Pending'} > 0` for more than 5 minutes AND `kube_disruption_budget_status_pod_disruptions_allowed\
+        \ == 0` simultaneously \u2014 this combination is the signature of the PDB-blocks-scaling deadlock pattern."
+    - category: scheduling
+      roi: medium
+      suggestion: 'Set `preemptionPolicy: PreemptLowerPriority` (the default) on the `hog` Deployment pods and assign them
+        a higher PriorityClass. This allows the scheduler to preempt lower-priority workloads (like `another-app`) to make
+        room, rather than leaving the replica permanently stuck.'
+    problem: "The pod `another-app` itself launched successfully in 1 second and is Running/Ready \u2014 it is not experiencing\
+      \ a launch failure. However, it is the proximate cause of a cluster-wide scheduling deadlock in the `eval-pdb-blocks-scaling`\
+      \ namespace. `another-app` occupies 6 of 10 allocatable CPUs on `debug-agent-worker`, leaving only ~3.93 free. The `hog`\
+      \ Deployment (ReplicaSet `hog-96c7cb576`) needs 2 replicas each requesting 7 CPUs; one replica (`hog-96c7cb576-b6wzd`)\
+      \ is Running on `debug-agent-worker2` using 7 of 10 CPUs (leaving ~3 free), and the second replica (`hog-96c7cb576-l24lf`)\
+      \ is permanently stuck Pending because neither schedulable worker node has 7 free CPUs. The PDB `hog-pdb` mandates `minAvailable:\
+      \ 2` for `app=hog` pods, but with only 1 of the expected 2 pods currently healthy, `disruptionsAllowed` is 0 \u2014\
+      \ no eviction can free space. Two other nodes are unreachable for this workload: `debug-agent-control-plane` has a `node-role.kubernetes.io/control-plane:NoSchedule`\
+      \ taint, and `debug-agent-worker3` has a `reserved=topology-test:NoSchedule` taint, neither of which the `hog` pods\
+      \ tolerate. The result is a permanent deadlock: the second `hog` replica cannot be scheduled because nodes are full,\
+      \ nodes cannot be freed because the PDB blocks eviction, and the PDB blocks eviction because the second replica hasn't\
+      \ started yet."
+    remediations:
+    - action: "Reduce `another-app`'s CPU request to \u22643 cores so that `debug-agent-worker` has \u22657 CPUs free for\
+        \ the second `hog` replica. Apply: `kubectl patch pod another-app -n eval-pdb-blocks-scaling --type=json -p '[{\"\
+        op\":\"replace\",\"path\":\"/spec/containers/0/resources/requests/cpu\",\"value\":\"3\"},{\"op\":\"replace\",\"path\"\
+        :\"/spec/containers/0/resources/limits/cpu\",\"value\":\"3\"}]'`. Since `another-app` is a bare pod (no controller),\
+        \ you may need to delete and recreate it with corrected resource specs."
+      tradeoffs: Reducing the CPU request may cause CPU throttling if the workload genuinely needs 6 cores. Verify actual
+        CPU usage before reducing. If the request is legitimately 6 CPUs, use the node-scaling remediation instead.
+    - action: "Scale up the cluster by adding a worker node with \u22657 allocatable CPUs (no control-plane or reserved taints)\
+        \ so the second `hog` replica can be scheduled without evicting anything. For a kind cluster: add a worker node config;\
+        \ for a cloud cluster: increase the node group min size by 1."
+      tradeoffs: Increases infrastructure cost. Fixes the immediate scheduling block but does not address the root cause of
+        oversized CPU requests. The PDB deadlock will recur if the new node also fills up.
+    - action: 'Temporarily lower the PDB to `minAvailable: 1` to allow evictions, let the scheduler reschedule, then raise
+        it back to 2 once both replicas are running: `kubectl patch pdb hog-pdb -n eval-pdb-blocks-scaling --type=json -p
+        ''[{"op":"replace","path":"/spec/minAvailable","value":1}]''`'
+      tradeoffs: During the window where minAvailable=1, the single healthy hog pod could be evicted, causing a service outage.
+        Use only as a last resort and revert immediately after both replicas are Running.
+    - action: 'If `another-app` is an ad-hoc or test pod and doesn''t need to keep running, delete it: `kubectl delete pod
+        another-app -n eval-pdb-blocks-scaling`. This immediately frees 6 CPUs on `debug-agent-worker`, allowing `hog-96c7cb576-l24lf`
+        to schedule there.'
+      tradeoffs: Only applicable if `another-app` is disposable. It has no owning controller and will not be recreated automatically
+        once deleted.
+  metrics:
+    cache_creation_input_tokens: 9077
+    cache_read_input_tokens: 33929
+    cost_usd: 0.16896
+    input_tokens: 23226
+    model: claude-sonnet-4-6
+    output_tokens: 3671
+    tools:
+      kubectl_list:
+        call_count: 7
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 4
+    wall_clock_seconds: 70.09
+  phase: Completed

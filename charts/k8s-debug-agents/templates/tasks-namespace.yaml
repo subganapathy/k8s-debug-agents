@@ -1,18 +1,26 @@
 {{/*
-Creates the agent-tasks namespace — ephemeral Job pods only.
+agent-tasks namespace — HOST FOR STEP-1 + STEP-3 TEST FIXTURES ONLY.
 
-Hosts:
-  - agent-task Job pods (created at runtime by the dispatcher when alerts fire)
+After PR-10's per-target Job model, variant Jobs no longer run here.
+They run in the target pod's namespace (per-target programmatic RBAC
+via agent_core.rbac_provisioner). This namespace remains because
+the Step-1 smoke-test pod (`evals/smoke-test/pod.yaml`) and the
+Step-3 credential-flow test pod (`evals/credential-flow/test-pod.yaml`)
+both live here and verify two distinct things:
 
-This namespace has NO chart-managed workloads. The chart manages:
-  - The namespace itself + its labels (Istio injection, PSA)
-  - Istio resources (ServiceEntry, DestinationRule, EnvoyFilter, Sidecar) that
-    govern outbound traffic from agent-task pods to api.anthropic.com via
-    credential-authz (in agent-platform)
+  smoke-test:        sidecar injection works for an agent-task-labeled pod
+  credential-flow:   the full ext_authz pipeline injects the real API key
 
-Pods themselves are runtime artifacts created by the dispatcher.
+Both tests are independent of the variant Job pipeline that PR-10
+introduces; they continue to use this dedicated namespace so the
+verification artifacts are isolated from any actual diagnostic work.
 
-Same security posture as agent-platform: PSA restricted + Istio injection.
+Pattern B note: pods in this namespace must carry the
+`sidecar.istio.io/inject: "true"` LABEL (not annotation) to get a
+sidecar — the istio webhook objectSelector matches on label.
+
+Same security posture as agent-platform: PSA restricted, ready for
+sidecar injection (no special namespace label needed under Pattern B).
 */}}
 apiVersion: v1
 kind: Namespace
@@ -21,9 +29,6 @@ metadata:
   labels:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
     app.kubernetes.io/part-of-namespace: tasks
-    {{- if .Values.tasksNamespace.istioInjection }}
-    istio-injection: enabled
-    {{- end }}
     {{- with .Values.tasksNamespace.podSecurity.enforce }}
     pod-security.kubernetes.io/enforce: {{ . | quote }}
     {{- end }}

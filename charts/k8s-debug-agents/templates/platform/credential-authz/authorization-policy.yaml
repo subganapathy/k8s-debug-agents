@@ -28,11 +28,13 @@ The peer's identity comes from its mTLS client certificate (provisioned
 by istiod). Format:
   spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount-name>
 
-Step 3 scope: allow ANY pod in agent-tasks namespace to call (not yet
-filtered by SA name pattern). This is intentional — Step 4 (dispatcher)
-will create per-task ServiceAccounts named like agent-task-<id>, and at
-that point we can tighten this to a wildcard match like
-`agent-task-*`. For now, namespace-level matching is sufficient.
+PR-10 scope: tightened to match per-Job SA pattern. Agent variant Jobs
+get per-invocation SAs named `agent-job-<uid>` (created programmatically
+by agent_core.rbac_provisioner). Their SPIFFE identity matches the
+wildcard pattern below.
+
+We also keep the existing Step-3 test pod allowance (credential-flow-test
+SA in any namespace) for the credential-flow end-to-end check.
 
 A separate DENY policy isn't needed: AuthorizationPolicy is allow-list
 by default. Without a matching ALLOW rule, traffic is denied.
@@ -50,10 +52,31 @@ spec:
       app.kubernetes.io/component: credential-authz
   action: ALLOW
   rules:
+    # Lightweight L7 backstop: requires the caller to be in our trust
+    # domain (mesh peer with a valid SPIFFE identity from istiod).
+    #
+    # The TIGHT runtime access enforcement lives in the NetworkPolicy
+    # (see ./network-policy.yaml). NetworkPolicy filters by pod LABEL
+    # (`app.kubernetes.io/component: agent-task` +
+    # `agent-task/created-by ∈ {cli, dispatcher}`), which works across
+    # arbitrary target namespaces — something Istio AuthorizationPolicy
+    # can't do because its `principals` field doesn't support
+    # segment-wise wildcards on SPIFFE URIs.
+    #
+    # Layered defense (top = first gate hit):
+    #   1. NetworkPolicy        — L3/L4 pod-label gate (primary)
+    #   2. PeerAuthentication   — STRICT mTLS handshake
+    #   3. AuthorizationPolicy  — this rule (mesh peer presence check)
+    #   4. Kyverno (PR-16)      — admission-time label & RBAC enforcement
+    #
+    # Why keep this rule at all: defense in depth. If someone disables
+    # NetworkPolicy enforcement at the CNI level (or runs a CNI that
+    # silently doesn't support it), AuthorizationPolicy still blocks
+    # non-mesh callers. Cheap to keep.
     - from:
         - source:
-            namespaces:
-              - {{ .Values.tasksNamespace.name | quote }}
+            principals:
+              - "cluster.local/*"
       to:
         - operation:
             ports:

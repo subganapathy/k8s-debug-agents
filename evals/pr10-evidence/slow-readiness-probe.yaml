@@ -1,0 +1,94 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: 1e8d5cbd
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-1e8d5cbd
+  namespace: eval-slow-readiness-probe
+spec:
+  target:
+    namespace: eval-slow-readiness-probe
+    podName: slow-ready-app
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "If this pod is part of a Deployment used by an HPA, measure the end-to-end scale-out latency under load \u2014 54s\
+      \ per pod means 54+ seconds of under-provisioned capacity during traffic spikes."
+    - If a real health-check is added later, verify the chosen initialDelaySeconds against actual p95 application cold-start
+      time using `kubectl get events` timing on a staging deployment before promoting to production.
+    - Check other pods/deployments in the same namespace or team for the same pattern of large initialDelaySeconds with trivially-passing
+      probe commands.
+    confidence: high
+    evidence:
+    - detail: readinessProbe.initialDelaySeconds=45, periodSeconds=10, probe command=['true'] (always succeeds instantly).
+        The 45s initial delay is the sole source of launch latency.
+      kind: pod_spec
+    - detail: initialized_to_containers_ready=54s (45s initial delay + one 10s period cycle before the first successful probe
+        result was recorded). All other phases were 0s.
+      kind: launch_timing
+    - detail: "Container started at 08:30:24 (event: 'Started container app'), pod became Ready at 08:31:16 \u2014 52 seconds\
+        \ of unnecessary waiting while the container was already healthy."
+      kind: pod_status
+    - detail: No Unhealthy, BackOff, or FailedMount events. Image was already cached ('already present on machine'). The delay
+        is 100% probe configuration, not application behaviour.
+      kind: k8s_event
+    improvements:
+    - category: pod_spec
+      roi: high
+      suggestion: Add a CI/linting rule (e.g., via conftest/OPA or a ValidatingAdmissionWebhook) that warns when readinessProbe.initialDelaySeconds
+        > 15. This catches over-padded probes before they reach production and create unnecessary scale-up latency.
+    - category: monitoring
+      roi: high
+      suggestion: Alert on pod ready latency (time from pod creation to Ready condition = true) exceeding a threshold (e.g.,
+        30s for this workload). Use kube-state-metrics `kube_pod_status_ready` and `kube_pod_created` to build this SLI. Slow
+        readiness is often invisible until it causes an incident during a traffic surge.
+    - category: pod_spec
+      roi: medium
+      suggestion: Replace trivial probe commands (`true`, `exit 0`) with meaningful health checks (HTTP /healthz endpoint,
+        TCP socket, or application-specific command). A probe that always succeeds provides zero safety signal and tempts
+        engineers to pad initialDelaySeconds 'just in case'.
+    problem: "The pod `slow-ready-app` took **54 seconds** to become Ready, with the entire delay concentrated in the `initialized_to_containers_ready`\
+      \ phase (0s scheduling, 0s init, 54s to ContainersReady). The root cause is an oversized `initialDelaySeconds: 45` on\
+      \ the readiness probe. The probe command itself (`exec: true`) is instantaneous \u2014 it can never fail \u2014 so the\
+      \ 45-second blanket wait before the *first probe attempt* is purely artificial dead time. The container was already\
+      \ healthy at `08:30:24` (per the \"Started container app\" event), but Kubernetes withheld the Ready signal until `08:31:16`\
+      \ purely because of this delay setting. In production, this inflates HPA scale-up latency, extends rolling-update windows,\
+      \ and causes traffic drops if the pod sits behind a load balancer that waits for Ready."
+    remediations:
+    - action: "Reduce initialDelaySeconds to a value that reflects actual application startup time. Since the probe command\
+        \ is `true` (always passes), set it to 0 or 1:\n\n```yaml\nreadinessProbe:\n  exec:\n    command: [\"true\"]\n  initialDelaySeconds:\
+        \ 1   # or 0\n  periodSeconds: 5\n  failureThreshold: 3\n  successThreshold: 1\n  timeoutSeconds: 1\n```\n\nIf the\
+        \ probe is later changed to a real health-check command (e.g., HTTP or a socket check), tune `initialDelaySeconds`\
+        \ to match the real p95 cold-start time of that specific application, not a padded guess."
+      tradeoffs: Setting initialDelaySeconds too low for a real application can cause spurious probe failures during JVM warmup
+        or DB connection pool initialisation, leading to brief Unhealthy events and restart loops. For this specific `true`-command
+        probe there is no risk. For future real probes, validate against actual startup timing before reducing.
+    - action: "If the application does have a genuine warm-up period, replace the blanket `initialDelaySeconds` with a `startupProbe`\
+        \ to cover the slow-start window, then keep `initialDelaySeconds` on the readiness probe at \u22645s:\n\n```yaml\n\
+        startupProbe:\n  exec:\n    command: [\"<real-health-check>\"]\n  failureThreshold: 30    # 30 \xD7 2s = up to 60s\
+        \ allowed for startup\n  periodSeconds: 2\nreadinessProbe:\n  exec:\n    command: [\"<real-health-check>\"]\n  initialDelaySeconds:\
+        \ 0\n  periodSeconds: 5\n  failureThreshold: 3\n```\n\nThe startupProbe gates the readiness probe from running until\
+        \ the app has passed at least one startup check, eliminating the need for a large fixed delay."
+      tradeoffs: Introduces a second probe, slightly more configuration to maintain. However, this is the idiomatic Kubernetes
+        pattern for slow-starting apps and is strictly better than a large initialDelaySeconds because it adapts to actual
+        startup speed rather than assuming worst-case.
+  metrics:
+    cache_creation_input_tokens: 2610
+    cache_read_input_tokens: 15670
+    cost_usd: 0.058028
+    input_tokens: 4968
+    model: claude-sonnet-4-6
+    output_tokens: 1909
+    tools:
+      kubectl_list:
+        call_count: 1
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 2
+    wall_clock_seconds: 50.88
+  phase: Completed

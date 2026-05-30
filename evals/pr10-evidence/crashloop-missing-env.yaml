@@ -1,0 +1,114 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: ffde0d0c
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-ffde0d0c
+  namespace: eval-crashloop-missing-env
+spec:
+  target:
+    namespace: eval-crashloop-missing-env
+    podName: panicking-app
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify whether a parent workload (Deployment / Job) owns this pod \u2014 if so, the env injection fix must be applied\
+      \ to the workload's pod template, not the pod directly."
+    - 'Confirm whether a Secret and/or ConfigMap with the required values already exists in namespace eval-crashloop-missing-env
+      but was simply not referenced in the pod spec (run: kubectl get secret,configmap -n eval-crashloop-missing-env).'
+    - Check if TLS_CERT_PATH and TLS_KEY_PATH point to files that need to be mounted via a volume (e.g., from a kubernetes.io/tls
+      Secret) in addition to being set as env vars.
+    - Review whether all 20 env vars are truly required at startup or whether some (e.g., FEATURE_FLAGS, CACHE_TTL_SECONDS)
+      could have safe defaults hardcoded in the application to reduce mandatory external dependencies.
+    confidence: high
+    evidence:
+    - detail: Container 'app' is in state CrashLoopBackOff (waiting), restartCount=1, lastState.terminated.exitCode=1, reason=Error.
+        The pod has been crashing since first start at 2026-05-30T08:23:45Z.
+      kind: pod_status
+    - detail: "The pod's spec.containers[0] has no `env`, `envFrom`, or Secret/ConfigMap-backed volume mounts \u2014 zero\
+        \ environment variables are injected into the container."
+      kind: pod_spec
+    - detail: The startup command iterates over 20 required env vars (DB_URL, DB_USERNAME, DB_PASSWORD, REDIS_HOST, REDIS_PORT,
+        KAFKA_BROKERS, S3_BUCKET, S3_REGION, SENTRY_DSN, OTEL_ENDPOINT, LOG_LEVEL, HTTP_PORT, GRPC_PORT, METRICS_PORT, FEATURE_FLAGS,
+        API_KEY, JWT_SECRET, TLS_CERT_PATH, TLS_KEY_PATH, CACHE_TTL_SECONDS) and explicitly logs each one as 'not set in container
+        environment'.
+      kind: pod_spec
+    - detail: 'Container logs (previous instance) confirm: ''[ERROR] FATAL: DB_URL environment variable is required but not
+        set'' followed by ''[ERROR] panic: cannot establish database connection without DB_URL'' at main.connectDB (main.go:42).'
+      kind: k8s_event
+    - detail: Log triage signature=missing_config, confidence=high. The app probed DB_URL 20 times over ~2s before giving
+        up, showing the retry loop is exhausted before the fatal exit.
+      kind: k8s_event
+    improvements:
+    - category: pod_spec
+      roi: high
+      suggestion: Add a startup validation step (or use an init container) that checks all required env vars are present and
+        non-empty before the main application process runs. Fail fast with a clear human-readable error listing ALL missing
+        vars at once, rather than discovering them one-by-one after repeated crash loops.
+    - category: admission_control
+      roi: high
+      suggestion: 'Use a ValidatingAdmissionWebhook or OPA/Kyverno policy to enforce that pods with a given label (e.g., `eval-scenario:
+        crashloop-missing-env`) must have `envFrom` entries referencing the expected Secret and ConfigMap. This catches missing
+        env injection at deploy time rather than runtime.'
+    - category: monitoring
+      roi: high
+      suggestion: Alert on `kube_pod_container_status_restarts_total` increasing more than 2 times within 5 minutes for any
+        pod. CrashLoopBackOff with a missing-config root cause is almost always operator error and should page immediately
+        rather than silently retry.
+    - category: pod_spec
+      roi: medium
+      suggestion: Consider using an External Secrets Operator (ESO) or Sealed Secrets to manage the lifecycle of these secrets
+        declaratively in GitOps workflows, ensuring the Secret objects always exist before the workload is deployed.
+    problem: "The container `app` in pod `panicking-app` is stuck in CrashLoopBackOff because its startup script probes for\
+      \ 20 required environment variables (DB_URL, DB_USERNAME, DB_PASSWORD, REDIS_HOST, REDIS_PORT, KAFKA_BROKERS, S3_BUCKET,\
+      \ S3_REGION, SENTRY_DSN, OTEL_ENDPOINT, LOG_LEVEL, HTTP_PORT, GRPC_PORT, METRICS_PORT, FEATURE_FLAGS, API_KEY, JWT_SECRET,\
+      \ TLS_CERT_PATH, TLS_KEY_PATH, CACHE_TTL_SECONDS) and finds none of them set. The application retries the check for\
+      \ DB_URL 20 times (100ms each) before logging a fatal error \u2014 \"FATAL: DB_URL environment variable is required\
+      \ but not set\" \u2014 and panicking at `main.connectDB` (main.go:42). It exits with code 1, triggering kubelet's CrashLoopBackOff\
+      \ restart loop. The pod spec contains no `env`, `envFrom`, or Secret/ConfigMap volume mounts that would supply these\
+      \ values; they were simply never injected into the pod definition."
+    remediations:
+    - action: "Inject all required environment variables via a Secret and/or ConfigMap. At minimum, create a Secret for sensitive\
+        \ values and a ConfigMap for non-sensitive ones, then reference them in the pod spec:\n\n```yaml\n# 1. Create a Secret\
+        \ for sensitive values\nkubectl -n eval-crashloop-missing-env create secret generic app-secrets \\\n  --from-literal=DB_URL='postgres://host:5432/db'\
+        \ \\\n  --from-literal=DB_USERNAME='user' \\\n  --from-literal=DB_PASSWORD='pass' \\\n  --from-literal=API_KEY='...'\
+        \ \\\n  --from-literal=JWT_SECRET='...' \\\n  --from-literal=TLS_CERT_PATH='/certs/tls.crt' \\\n  --from-literal=TLS_KEY_PATH='/certs/tls.key'\
+        \ \\\n  --from-literal=SENTRY_DSN='https://...'\n\n# 2. Create a ConfigMap for non-sensitive values\nkubectl -n eval-crashloop-missing-env\
+        \ create configmap app-config \\\n  --from-literal=REDIS_HOST='redis-svc' \\\n  --from-literal=REDIS_PORT='6379' \\\
+        \n  --from-literal=KAFKA_BROKERS='kafka:9092' \\\n  --from-literal=S3_BUCKET='my-bucket' \\\n  --from-literal=S3_REGION='us-east-1'\
+        \ \\\n  --from-literal=OTEL_ENDPOINT='http://otel-collector:4318' \\\n  --from-literal=LOG_LEVEL='info' \\\n  --from-literal=HTTP_PORT='8080'\
+        \ \\\n  --from-literal=GRPC_PORT='9090' \\\n  --from-literal=METRICS_PORT='9091' \\\n  --from-literal=FEATURE_FLAGS='{}'\
+        \ \\\n  --from-literal=CACHE_TTL_SECONDS='300'\n\n# 3. Patch the pod spec (or parent workload) to inject them:\nspec:\n\
+        \  containers:\n  - name: app\n    envFrom:\n    - secretRef:\n        name: app-secrets\n    - configMapRef:\n  \
+        \      name: app-config\n```"
+      tradeoffs: "Using `envFrom` injects ALL keys from the Secret/ConfigMap as env vars \u2014 ensure no key names collide\
+        \ between the two sources. Secrets stored as Kubernetes Secrets are base64-encoded, not encrypted at rest by default;\
+        \ consider enabling envelope encryption or using an external secrets manager (e.g., AWS Secrets Manager via External\
+        \ Secrets Operator) for production credentials."
+    - action: 'If this pod is managed by a Deployment, StatefulSet, or Job, edit the parent resource''s pod template rather
+        than the pod directly (pods are immutable after creation): `kubectl -n eval-crashloop-missing-env edit deployment
+        <name>` and add the `envFrom` block under the container spec.'
+      tradeoffs: Editing the parent workload triggers a rolling restart of all pods. Ensure the new Secret/ConfigMap objects
+        are created BEFORE editing the workload, or the new pods will also fail with ImagePullBackOff or envFrom reference
+        errors.
+  metrics:
+    cache_creation_input_tokens: 3085
+    cache_read_input_tokens: 15670
+    cost_usd: 0.063586
+    input_tokens: 3532
+    model: claude-sonnet-4-6
+    output_tokens: 2448
+    tools:
+      kubectl_get_container_logs:
+        call_count: 1
+        sub_agent_calls:
+          log_triage: 1
+        sub_agent_cost_usd: 0.004906
+    turns_used: 2
+    wall_clock_seconds: 46.74
+  phase: Completed

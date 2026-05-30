@@ -1,0 +1,116 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: 64e3c95e
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-64e3c95e
+  namespace: eval-taint-toleration-mismatch
+spec:
+  target:
+    namespace: eval-taint-toleration-mismatch
+    podName: needs-worker3
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - "Verify whether the pod was intentionally designed to run on debug-agent-worker3 (e.g., for topology/zone-specific testing\
+      \ in us-west-2c) \u2014 the choice between adding the toleration vs. changing the nodeSelector depends on this."
+    - Check if other pods in the namespace or cluster are similarly affected by the reserved=topology-test:NoSchedule taint
+      on debug-agent-worker3.
+    - "Confirm whether the taint on debug-agent-worker3 was applied deliberately (e.g., a topology test reservation) or accidentally\
+      \ \u2014 run: kubectl describe node debug-agent-worker3 | grep Taint"
+    - If this pod is part of a larger test scenario, check whether the scenario's setup script is supposed to add the toleration
+      but failed to do so.
+    confidence: high
+    evidence:
+    - detail: Pod phase=Pending, PodScheduled condition is False with reason=Unschedulable since creation at 2026-05-30T08:32:16Z.
+      kind: pod_status
+    - detail: "FailedScheduling: '1 node(s) had untolerated taint {reserved: topology-test}, 2 node(s) didn't match Pod's\
+        \ node affinity/selector' \u2014 the scheduler found debug-agent-worker3 but rejected it due to the untolerated taint."
+      kind: k8s_event
+    - detail: spec.nodeSelector pins the pod to kubernetes.io/hostname=debug-agent-worker3 exclusively; no other node can
+        satisfy this selector.
+      kind: pod_spec
+    - detail: 'Node debug-agent-worker3 has taint: key=reserved, value=topology-test, effect=NoSchedule. This taint blocks
+        all pods that do not carry a matching toleration.'
+      kind: node_state
+    - detail: Pod's spec.tolerations contains only the two default Kubernetes system tolerations (node.kubernetes.io/not-ready
+        and node.kubernetes.io/unreachable, both NoExecute). There is no toleration for reserved=topology-test:NoSchedule.
+      kind: pod_spec
+    - detail: debug-agent-worker (no taints) and debug-agent-worker2 (no taints) are available workers, but the nodeSelector
+        prevents the pod from landing on them.
+      kind: node_state
+    improvements:
+    - category: pod_spec
+      roi: high
+      suggestion: 'Add toleration validation to CI/CD pipelines or admission webhooks: whenever a pod spec includes a nodeSelector
+        targeting a specific hostname, automatically verify that the pod''s tolerations cover all taints present on that node.
+        This catches taint/toleration mismatches before deployment.'
+    - category: admission_control
+      roi: high
+      suggestion: Deploy a ValidatingAdmissionWebhook (or use OPA/Kyverno) that cross-references nodeSelector hostname values
+        against live node taints and rejects pod specs that would be immediately unschedulable. This makes the failure synchronous
+        at apply-time rather than silent at runtime.
+    - category: monitoring
+      roi: medium
+      suggestion: Alert on pods with PodScheduled=False for more than 2 minutes. The Kubernetes scheduler does not automatically
+        retry failed placements when no cluster state changes; a pod can remain stuck indefinitely without alerting.
+    - category: scheduling
+      roi: low
+      suggestion: Document (e.g., via a node label like `purpose=topology-test`) the intended usage of tainted nodes and maintain
+        a runbook specifying which workload types are allowed on reserved nodes. This reduces the chance of operators writing
+        nodeSelectors that target reserved nodes without the required tolerations.
+    problem: 'Pod `needs-worker3` is permanently stuck in Pending because it targets node `debug-agent-worker3` via `spec.nodeSelector:
+      kubernetes.io/hostname: debug-agent-worker3`, but that node carries a `NoSchedule` taint (`reserved=topology-test`)
+      for which the pod has no matching toleration. The pod''s only tolerations cover `node.kubernetes.io/not-ready` and `node.kubernetes.io/unreachable`
+      (both `NoExecute`), which are Kubernetes built-ins and do nothing to overcome the custom `reserved=topology-test:NoSchedule`
+      taint. Since the nodeSelector pins the pod exclusively to `debug-agent-worker3`, the scheduler cannot fall back to `debug-agent-worker`
+      or `debug-agent-worker2` (the two untainted worker nodes), making the pod permanently unschedulable.'
+    remediations:
+    - action: "Add a toleration for the node's taint to the pod spec. Since this pod is not controller-managed (restartPolicy=Never,\
+        \ no owner), delete and re-create it with the following addition under spec.tolerations:\n\n```yaml\ntolerations:\n\
+        \  - key: \"reserved\"\n    operator: \"Equal\"\n    value: \"topology-test\"\n    effect: \"NoSchedule\"\n  # keep\
+        \ the existing system tolerations below\n  - effect: NoExecute\n    key: node.kubernetes.io/not-ready\n    operator:\
+        \ Exists\n    tolerationSeconds: 300\n  - effect: NoExecute\n    key: node.kubernetes.io/unreachable\n    operator:\
+        \ Exists\n    tolerationSeconds: 300\n```\n\nThen re-apply: kubectl delete pod -n eval-taint-toleration-mismatch needs-worker3\
+        \ && kubectl apply -f <updated-manifest>"
+      tradeoffs: The pod will now be allowed to run on debug-agent-worker3. Only use this if the workload is intended to run
+        on reserved/topology-test nodes. If the taint is meant to keep regular workloads away from worker3, granting this
+        toleration bypasses that isolation policy.
+    - action: "If the workload does NOT need to run on debug-agent-worker3 specifically, remove the nodeSelector entirely\
+        \ (or change it to target debug-agent-worker or debug-agent-worker2, which have no taints):\n\n```yaml\n# Remove or\
+        \ replace the nodeSelector\nnodeSelector:\n  kubernetes.io/hostname: debug-agent-worker  # or debug-agent-worker2\n\
+        ```"
+      tradeoffs: The pod will schedule on a different node than originally intended. Appropriate only if the worker3 pinning
+        was incorrect or unnecessary. If the workload has a topology/zone requirement (worker3 is in us-west-2c), moving it
+        to worker or worker2 changes the zone.
+    - action: 'If the taint on debug-agent-worker3 was applied by mistake and the node should not be reserved, remove the
+        taint:
+
+
+        ```
+
+        kubectl taint nodes debug-agent-worker3 reserved=topology-test:NoSchedule-
+
+        ```'
+      tradeoffs: This un-reserves the node and allows all workloads to schedule on it. Only safe if the taint was unintentional
+        or the reservation is no longer needed. This is a cluster-wide change affecting all pods targeting worker3.
+  metrics:
+    cache_creation_input_tokens: 1776
+    cache_read_input_tokens: 15670
+    cost_usd: 0.067479
+    input_tokens: 7381
+    model: claude-sonnet-4-6
+    output_tokens: 2265
+    tools:
+      kubectl_list:
+        call_count: 2
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 2
+    wall_clock_seconds: 43.72
+  phase: Completed

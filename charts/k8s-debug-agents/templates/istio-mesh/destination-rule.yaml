@@ -35,10 +35,14 @@ apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
   name: anthropic-api-tls-origination
-  namespace: {{ .Values.tasksNamespace.name }}
+  # PR-10: moved to istio-system + exportTo: ["*"] so this DR is visible
+  # to sidecars in any namespace (per-target Job model).
+  namespace: {{ .Values.istioMesh.namespace }}
   labels:
     {{- include "k8s-debug-agents.labels" . | nindent 4 }}
 spec:
+  exportTo:
+    - "*"
   host: api.anthropic.com
   trafficPolicy:
     portLevelSettings:

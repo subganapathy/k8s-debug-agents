@@ -34,10 +34,22 @@ dependencies = [
 ]
 
 [project.scripts]
-# Single git-style entry: `agent <variant> ...`. Variants are registered
-# as subcommands in `agent_core.cli._register_variants` — adding a new
-# variant means one import + one call there, not a new line here.
+# Two entry points from one image (PR-10):
+#
+#   `agent` — user-facing CLI. Spawns a K8s Job and watches its HR. This
+#             is what humans type AND what the eval harness shells out to.
+#             Pure orchestration; never runs the agent loop locally.
+#
+#   `agent-runner` — container entrypoint for variant Jobs. Runs the agent
+#             loop in-process and writes findings to HandoffRequest.status.
+#             Set as the Job's spec.containers[0].command by job_runner.py.
+#             Never invoked by humans.
+#
+# Both scripts share the same variant subparser registry (each variant's
+# register_cli attaches both spawn_handler + run_handler) so they grow
+# together when new variants land.
 agent = "agent_core.cli:main"
+agent-runner = "agent_core.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

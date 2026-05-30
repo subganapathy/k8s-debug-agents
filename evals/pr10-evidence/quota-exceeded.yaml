@@ -1,0 +1,112 @@
+apiVersion: k8s-debug-agents.io/v1
+kind: HandoffRequest
+metadata:
+  labels:
+    agent-task/created-by: cli
+    agent-task/run-uid: 4e4fa687
+    agent-task/variant: pod-launch
+    app.kubernetes.io/managed-by: agent-cli
+    app.kubernetes.io/name: k8s-debug-agents
+  name: agent-pod-launch-4e4fa687
+  namespace: eval-quota-exceeded
+spec:
+  target:
+    namespace: eval-quota-exceeded
+    podName: needs-room
+  variant: pod-launch
+status:
+  findings:
+    alsoCheck:
+    - Check whether the ~70m CPU used by the non-needs-room pod in the namespace is a permanent fixture or a temporary workload,
+      as freeing it would create ~70m more headroom.
+    - "Inspect the Deployment's rollout strategy (maxSurge): if maxSurge=1, rolling updates will require 4 pods simultaneously\
+      \ (800m CPU), which would fail even with a 700m quota increase \u2014 size the quota to replicas + maxSurge."
+    - Verify the limits.cpu quota (currently 1100m used of 1500m hard) and requests.memory (356Mi of 1Gi) are not approaching
+      exhaustion as well, especially if the CPU quota is raised and more pods are created.
+    - Check if other namespaces or teams share this cluster's node capacity, as raising the quota may require corresponding
+      node capacity additions.
+    confidence: high
+    evidence:
+    - detail: "kubectl_read for Pod/needs-room returned 404 Not Found \u2014 the pod was never admitted to the API server."
+      kind: pod_status
+    - detail: 'ReplicaSet needs-room-7ccb4d7c8 emitted repeated FailedCreate Warning events: "pods \"needs-room-7ccb4d7c8-fdt7b\"
+        is forbidden: exceeded quota: tight-quota, requested: requests.cpu=200m, used: requests.cpu=400m, limited: requests.cpu=500m".
+        At least 12 such failures were recorded in under 10 seconds.'
+      kind: k8s_event
+    - detail: "ResourceQuota tight-quota hard limit: requests.cpu=500m. Current used: requests.cpu=470m (3 pods running, 2\
+        \ belonging to this ReplicaSet). Only 30m CPU headroom remains \u2014 insufficient for another 200m pod."
+      kind: k8s_resource
+    - detail: ReplicaSet spec.replicas=3, status.replicas=2 (readyReplicas=2). ReplicaFailure condition is True with reason=FailedCreate,
+        confirming the controller is stuck unable to create the third replica.
+      kind: k8s_resource
+    - detail: "Each pod in the ReplicaSet requests resources.requests.cpu=200m and resources.limits.cpu=200m. Three replicas\
+        \ \xD7 200m = 600m total, which exceeds the 500m quota hard limit by 100m even without any other workloads in the\
+        \ namespace."
+      kind: pod_spec
+    improvements:
+    - category: admission_control
+      roi: high
+      suggestion: "Add a ValidatingAdmissionWebhook or use OPA/Gatekeeper to proactively reject Deployments whose replicas\
+        \ \xD7 requests.cpu would exceed namespace quota at admission time, surfacing the error to the developer at `kubectl\
+        \ apply` rather than at pod creation."
+    - category: monitoring
+      roi: high
+      suggestion: 'Create an alert on ResourceQuota utilization: fire when requests.cpu used / hard > 80% for more than 5
+        minutes. This gives operators warning before the quota is fully exhausted and pods start failing. Example Prometheus
+        query: kube_resourcequota{resource="requests.cpu",type="used"} / kube_resourcequota{resource="requests.cpu",type="hard"}
+        > 0.8'
+    - category: capacity_planning
+      roi: medium
+      suggestion: "Set the namespace quota's requests.cpu to at least (maxReplicas \xD7 requests.cpu_per_pod) + headroom for\
+        \ rollout surge (typically 1 extra pod). For this workload: 3\xD7200m + 200m surge = 800m. Document the quota sizing\
+        \ rationale alongside the quota manifest."
+    - category: pod_spec
+      roi: medium
+      suggestion: Audit whether requests.cpu=200m accurately reflects actual CPU consumption. If pods routinely use far less,
+        right-sizing the request (e.g., to 100m) both allows more replicas within quota AND improves bin-packing efficiency
+        on nodes.
+    problem: "The pod `needs-room` (managed by Deployment `needs-room` \u2192 ReplicaSet `needs-room-7ccb4d7c8`) cannot be\
+      \ created because the namespace `eval-quota-exceeded` has a ResourceQuota named `tight-quota` with a hard limit of `requests.cpu=500m`.\
+      \ The ReplicaSet desires 3 replicas, each requesting 200m CPU (600m total). Only 2 of the 3 pods were admitted (consuming\
+      \ 400m\u2013470m CPU), exhausting the remaining quota headroom. Every subsequent pod creation is rejected by the admission\
+      \ layer with: *\"exceeded quota: tight-quota, requested: requests.cpu=200m, used: requests.cpu=400m\u2013470m, limited:\
+      \ requests.cpu=500m\"*. The third pod never reaches the scheduler and never appears in the API \u2014 hence the 404\
+      \ on `needs-room`."
+    remediations:
+    - action: "Raise the ResourceQuota CPU request limit to accommodate all desired replicas. For 3 replicas at 200m each\
+        \ (plus the ~70m used by the third existing pod in the namespace), set requests.cpu to at least 670m (3\xD7200m +\
+        \ 70m for other pods). Example patch:\n\n  kubectl patch resourcequota tight-quota -n eval-quota-exceeded \\\n   \
+        \ --type=merge -p '{\"spec\":{\"hard\":{\"requests.cpu\":\"700m\"}}}'"
+      tradeoffs: Increases the namespace's CPU reservation footprint. If the quota was intentionally tight to protect other
+        namespaces/cluster resources, coordinate with the platform team before raising it. 700m is a conservative target;
+        size to actual workload needs.
+    - action: "Reduce the pod's CPU request so that 3 replicas fit within the current 500m quota. With 70m consumed by other\
+        \ namespace pods, each of the 3 app pods can request at most floor((500m\u221270m)/3) = 143m CPU. Update the Deployment's\
+        \ container resources:\n\n  kubectl set resources deployment/needs-room -n eval-quota-exceeded \\\n    --requests=cpu=140m\
+        \ --limits=cpu=200m"
+      tradeoffs: The CPU request reduction may cause the pods to be throttled under sustained load if the 140m request under-represents
+        actual usage. Monitor CPU throttling metrics after the change. The limit can stay at 200m to preserve burst capacity.
+    - action: "Scale the Deployment down to 2 replicas to match what the quota can currently accommodate:\n\n  kubectl scale\
+        \ deployment/needs-room -n eval-quota-exceeded --replicas=2"
+      tradeoffs: This is a workaround, not a fix. It silently accepts reduced capacity and may re-trigger the problem the
+        next time a rollout creates a surge replica. Only appropriate as a temporary measure while the quota or request is
+        adjusted.
+  metrics:
+    cache_creation_input_tokens: 966
+    cache_read_input_tokens: 23505
+    cost_usd: 0.096408
+    input_tokens: 17488
+    model: claude-sonnet-4-6
+    output_tokens: 2218
+    tools:
+      kubectl_list:
+        call_count: 2
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+      kubectl_read:
+        call_count: 1
+        sub_agent_calls: {}
+        sub_agent_cost_usd: 0
+    turns_used: 3
+    wall_clock_seconds: 45.49
+  phase: Completed
